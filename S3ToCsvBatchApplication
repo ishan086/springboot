@@ -1,29 +1,35 @@
 package com.example.batch;
 
+import org.springframework.batch.core.Job;
+import org.springframework.batch.core.Step;
 import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
-import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
-import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
-import org.springframework.batch.core.job.SimpleJobBuilder;
+
+
 import org.springframework.batch.core.job.builder.JobBuilder;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
-import org.springframework.batch.core.step.builder.StepBuilder;
 import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.ItemWriter;
-import org.springframework.batch.item.support.ListItemReader;
 import org.springframework.batch.item.support.IteratorItemReader;
+import org.springframework.batch.integration.async.AsyncItemProcessor;
+import org.springframework.batch.integration.async.AsyncItemWriter;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
+import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -31,13 +37,9 @@ import java.util.stream.IntStream;
 @EnableBatchProcessing
 public class BatchConfig {
     
-    private final JobBuilderFactory jobBuilderFactory;
-    private final StepBuilderFactory stepBuilderFactory;
     private final S3Client s3Client;
     
-    public BatchConfig(JobBuilderFactory jobBuilderFactory, StepBuilderFactory stepBuilderFactory, S3Client s3Client) {
-        this.jobBuilderFactory = jobBuilderFactory;
-        this.stepBuilderFactory = stepBuilderFactory;
+    public BatchConfig(S3Client s3Client) {
         this.s3Client = s3Client;
     }
     
@@ -58,16 +60,20 @@ public class BatchConfig {
     
     @Bean
     public ItemProcessor<List<String>, List<String>> processor() {
-        return objectKeys -> objectKeys.stream().map(key -> {
-            GetObjectRequest getObjectRequest = GetObjectRequest.builder()
-                    .bucket("your-bucket-name")
-                    .key(key)
-                    .build();
-            
-            ResponseBytes<GetObjectResponse> objectBytes = s3Client.getObjectAsBytes(getObjectRequest);
-            String content = new String(objectBytes.asByteArray(), StandardCharsets.UTF_8);
-            
-            return "Processed: " + key + " - Content: " + content;
+        return objectKeys -> objectKeys.parallelStream().map(key -> {
+            try {
+                GetObjectRequest getObjectRequest = GetObjectRequest.builder()
+                        .bucket("your-bucket-name")
+                        .key(key)
+                        .build();
+                
+                ResponseBytes<GetObjectResponse> objectBytes = s3Client.getObjectAsBytes(getObjectRequest);
+                String content = new String(objectBytes.asByteArray(), StandardCharsets.UTF_8);
+                
+                return "Processed: " + key + " - Content: " + content;
+            } catch (Exception e) {
+                return "Error processing: " + key + " - " + e.getMessage();
+            }
         }).collect(Collectors.toList());
     }
     
@@ -75,26 +81,51 @@ public class BatchConfig {
     public ItemWriter<List<String>> writer() {
         return items -> {
             for (List<String> batch : items) {
-                java.nio.file.Files.write(Paths.get("output.csv"), batch);
+                Files.write(Paths.get("output.csv"), batch);
             }
         };
     }
     
     @Bean
-    public org.springframework.batch.core.Step step1() {
-        return stepBuilderFactory.get("step1")
-                .<List<String>, List<String>>chunk(1)
+    public ThreadPoolTaskExecutor taskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(5);
+        executor.setMaxPoolSize(10);
+        executor.setQueueCapacity(25);
+        executor.initialize();
+        return executor;
+    }
+    
+    @Bean
+    public AsyncItemProcessor<List<String>, List<String>> asyncProcessor() {
+        AsyncItemProcessor<List<String>, List<String>> asyncProcessor = new AsyncItemProcessor<>();
+        asyncProcessor.setDelegate(processor());
+        asyncProcessor.setTaskExecutor(taskExecutor());
+        return asyncProcessor;
+    }
+    
+    @Bean
+    public AsyncItemWriter<List<String>> asyncWriter() {
+        AsyncItemWriter<List<String>> asyncWriter = new AsyncItemWriter<>();
+        asyncWriter.setDelegate(writer());
+        return asyncWriter;
+    }
+    
+    @Bean
+    public Step step1(JobRepository jobRepository, PlatformTransactionManager transactionManager) {
+        return new StepBuilder("step1", jobRepository)
+                .<List<String>, List<String>>chunk(1, transactionManager)
                 .reader(s3ObjectReader())
-                .processor(processor())
-                .writer(writer())
+                .processor(asyncProcessor())
+                .writer(asyncWriter())
                 .build();
     }
     
     @Bean
-    public org.springframework.batch.core.Job job() {
-        return jobBuilderFactory.get("s3Job")
+    public Job job(JobRepository jobRepository, Step step1) {
+        return new JobBuilder("s3Job", jobRepository)
                 .incrementer(new RunIdIncrementer())
-                .start(step1())
+                .start(step1)
                 .build();
     }
 }
