@@ -1,0 +1,119 @@
+package com.example.s3batch;
+
+import org.springframework.batch.core.Job;
+import org.springframework.batch.core.Step;
+import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
+import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
+import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
+import org.springframework.batch.item.ItemProcessor;
+import org.springframework.batch.item.ItemReader;
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.batch.item.support.ListItemReader;
+import org.springframework.batch.item.file.FlatFileItemWriter;
+import org.springframework.batch.item.file.builder.FlatFileItemWriterBuilder;
+import org.springframework.batch.item.file.transform.DelimitedLineAggregator;
+import org.springframework.batch.item.file.transform.PassThroughLineAggregator;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.core.io.FileSystemResource;
+import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.S3Object;
+
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@SpringBootApplication
+@EnableBatchProcessing
+public class S3BatchApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(S3BatchApplication.class, args);
+    }
+
+    @Bean
+    public S3Client s3Client() {
+        return S3Client.builder()
+                .region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsSessionCredentials.create(
+                                "your-access-key-id",
+                                "your-secret-access-key",
+                                "your-session-token"
+                        )
+                ))
+                .build();
+    }
+
+    @Bean
+    public List<String> s3ObjectKeys(S3Client s3Client) {
+        return fetchRecentS3Keys(s3Client, "your-bucket-name");
+    }
+
+    private List<String> fetchRecentS3Keys(S3Client s3Client, String bucketName) {
+        List<String> keys = new ArrayList<>();
+        String continuationToken = null;
+        Instant last24Hours = Instant.now().minus(24, ChronoUnit.HOURS);
+        
+        do {
+            ListObjectsV2Request.Builder requestBuilder = ListObjectsV2Request.builder().bucket(bucketName);
+            if (continuationToken != null) {
+                requestBuilder.continuationToken(continuationToken);
+            }
+            
+            ListObjectsV2Response response = s3Client.listObjectsV2(requestBuilder.build());
+            keys.addAll(response.contents().stream()
+                    .filter(obj -> obj.lastModified().isAfter(last24Hours))
+                    .map(S3Object::key)
+                    .collect(Collectors.toList()));
+            
+            continuationToken = response.nextContinuationToken();
+        } while (continuationToken != null);
+        
+        return keys;
+    }
+
+    @Bean
+    public ItemReader<String> itemReader(List<String> s3ObjectKeys) {
+        return new ListItemReader<>(s3ObjectKeys);
+    }
+
+    @Bean
+    public ItemProcessor<String, String> itemProcessor() {
+        return item -> "Processed: " + item;
+    }
+
+    @Bean
+    public ItemWriter<String> itemWriter() {
+        return new FlatFileItemWriterBuilder<String>()
+                .name("csvWriter")
+                .resource(new FileSystemResource("output.csv"))
+                .lineAggregator(new DelimitedLineAggregator<>())
+                .build();
+    }
+
+    @Bean
+    public Step s3Step(StepBuilderFactory stepBuilderFactory, ItemReader<String> reader,
+                       ItemProcessor<String, String> processor, ItemWriter<String> writer) {
+        return stepBuilderFactory.get("s3Step")
+                .<String, String>chunk(10)
+                .reader(reader)
+                .processor(processor)
+                .writer(writer)
+                .build();
+    }
+
+    @Bean
+    public Job s3Job(JobBuilderFactory jobBuilderFactory, Step s3Step) {
+        return jobBuilderFactory.get("s3Job")
+                .start(s3Step)
+                .build();
+    }
+}
