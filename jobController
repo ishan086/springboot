@@ -1,0 +1,29 @@
+import org.springframework.batch.core.Job;
+import org.springframework.batch.core.JobParameters;
+import org.springframework.batch.core.JobParametersBuilder;
+import org.springframework.batch.core.launch.JobLauncher;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class JobController {
+
+    @Autowired
+    private JobLauncher jobLauncher;
+
+    @Autowired
+    private Job s3ToCsvJob;  // Inject your job
+
+    @PostMapping("/startJob")
+    public ResponseEntity<String> startJob() throws Exception {
+        JobParameters jobParameters = new JobParametersBuilder()
+                .addLong("time", System.currentTimeMillis()) // Add a unique parameter to ensure job execution each time
+                .toJobParameters();
+
+        jobLauncher.run(s3ToCsvJob, jobParameters); // Start the job
+
+        return ResponseEntity.ok("Job started successfully!");
+    }
+}
