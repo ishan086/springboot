@@ -1,0 +1,193 @@
+import org.springframework.batch.core.Job;
+import org.springframework.batch.core.Step;
+import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
+import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.launch.support.RunIdIncrementer;
+import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.item.ItemProcessor;
+import org.springframework.batch.item.ItemReader;
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.batch.item.support.ListItemReader;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.core.task.TaskExecutor;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.S3Object;
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
+
+@SpringBootApplication
+@EnableBatchProcessing
+public class S3ToCsvBatchApplication {
+
+    @Autowired
+    private S3Client s3Client;
+
+    @Value("${aws.s3.bucketName}")
+    private String bucketName;
+
+    public static void main(String[] args) {
+        SpringApplication.run(S3ToCsvBatchApplication.class, args);
+    }
+
+    @Bean
+    public Job s3ToCsvJob() {
+        return new JobBuilder("s3ToCsvJob", jobRepository())
+                .incrementer(new RunIdIncrementer())
+                .flow(readS3ObjectsStep(), processAndWriteToCsvStep())
+                .end()
+                .build();
+    }
+
+    @Bean
+    public Step readS3ObjectsStep() {
+        return new StepBuilder("readS3ObjectsStep", jobRepository())
+                .<S3Object, S3Object>chunk(10, transactionManager()) // Process in chunks for potential memory efficiency with large lists
+                .reader(s3ObjectReader())
+                .writer(new NoOpWriter<>()) // We don't need to write in this step, just read and collect
+                .build();
+    }
+
+
+    @Bean
+    public ItemReader<S3Object> s3ObjectReader() {
+        return new ItemReader<S3Object>() {
+            private List<S3Object> s3Objects;
+            private int currentIndex = 0;
+
+            @Override
+            public S3Object read() throws Exception {
+                if (s3Objects == null) {
+                    s3Objects = fetchS3Objects();
+                }
+
+                if (currentIndex < s3Objects.size()) {
+                    return s3Objects.get(currentIndex++);
+                } else {
+                    return null; // Signal end of data
+                }
+            }
+
+            private List<S3Object> fetchS3Objects() {
+                List<S3Object> objects = new ArrayList<>();
+                Instant twentyFourHoursAgo = Instant.now().minus(24, ChronoUnit.HOURS);
+
+                ListObjectsV2Request request = ListObjectsV2Request.builder()
+                        .bucket(bucketName)
+                        .build();
+
+                ListObjectsV2Response response;
+                String continuationToken = null;
+
+                do {
+                    if (continuationToken != null) {
+                        request = request.toBuilder().continuationToken(continuationToken).build();
+                    }
+
+                    response = s3Client.listObjectsV2(request);
+
+                    for (S3Object s3Object : response.contents()) {
+                        // Filter based on last modified date.  S3 stores dates in UTC.
+                        LocalDateTime lastModified = s3Object.lastModified().atZone(ZoneId.of("UTC")).toLocalDateTime();
+                        if (lastModified.isAfter(LocalDateTime.ofInstant(twentyFourHoursAgo, ZoneId.of("UTC")))) {
+                            objects.add(s3Object);
+                        }
+                    }
+
+                    continuationToken = response.nextContinuationToken();
+                } while (continuationToken != null);
+
+                return objects;
+            }
+        };
+    }
+
+
+    @Bean
+    public Step processAndWriteToCsvStep() {
+        return new StepBuilder("processAndWriteToCsvStep", jobRepository())
+                .<S3Object, String>chunk(10, transactionManager())
+                .reader(new ListItemReader<>(s3ObjectReader().fetchS3Objects())) // Pass the list directly
+                .processor(s3ObjectProcessor())
+                .writer(csvFileWriter())
+                .taskExecutor(taskExecutor()) // Use a task executor for parallel processing
+                .build();
+    }
+
+
+    @Bean
+    public ItemProcessor<S3Object, String> s3ObjectProcessor() {
+        return s3Object -> {
+            // Process the S3Object and return a String to be written to the CSV.
+            // Example: extract metadata, construct a CSV row.
+            return s3Object.key() + "," + s3Object.size() + "," + s3Object.lastModified(); // Example CSV row
+        };
+    }
+
+    @Bean
+    public ItemWriter<String> csvFileWriter() {
+        return new ItemWriter<String>() {
+            private boolean headerWritten = false;
+            private FileWriter writer;
+
+            @Override
+            public void write(List<? extends String> items) throws Exception {
+                if (!headerWritten) {
+                    writer = new FileWriter("s3_objects.csv"); // Or configure path
+                    writer.write("Key,Size,LastModified\n"); // CSV header
+                    headerWritten = true;
+                }
+
+                for (String item : items) {
+                    writer.write(item + "\n");
+                }
+                writer.flush(); // Important to flush regularly
+            }
+
+            @PreDestroy  // Close the file when the job is done
+            public void close() throws IOException{
+                if(writer != null){
+                    writer.close();
+                }
+            }
+
+        };
+    }
+
+
+    @Bean
+    public TaskExecutor taskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(5); // Adjust as needed
+        executor.setMaxPoolSize(10); // Adjust as needed
+        executor.setQueueCapacity(25); // Adjust as needed
+        executor.setThreadNamePrefix("s3-to-csv-");
+        executor.initialize();
+        return executor;
+    }
+
+
+    // ... (Other necessary Spring Batch beans like jobRepository, transactionManager)
+
+    // Dummy NoOpWriter for the first step.
+    private static class NoOpWriter<T> implements ItemWriter<T> {
+        @Override
+        public void write(List<? extends T> items) throws Exception {
+            // Do nothing in this step.  We're just collecting the S3 objects.
+        }
+    }
+}
