@@ -3,20 +3,16 @@ package com.example.batch;
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
 import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
-
-
 import org.springframework.batch.core.job.builder.JobBuilder;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.step.builder.StepBuilder;
 import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.ItemWriter;
 import org.springframework.batch.item.support.IteratorItemReader;
-import org.springframework.batch.integration.async.AsyncItemProcessor;
-import org.springframework.batch.integration.async.AsyncItemWriter;
-import org.springframework.batch.core.repository.JobRepository;
-import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.transaction.PlatformTransactionManager;
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
@@ -29,20 +25,19 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 @Configuration
 @EnableBatchProcessing
 public class BatchConfig {
-    
+
     private final S3Client s3Client;
-    
+
     public BatchConfig(S3Client s3Client) {
         this.s3Client = s3Client;
     }
-    
+
     @Bean
     public IteratorItemReader<List<String>> s3ObjectReader() {
         List<String> objectKeys = s3Client.listObjectsV2(req -> req.bucket("your-bucket-name")).contents()
@@ -50,33 +45,33 @@ public class BatchConfig {
                 .filter(obj -> obj.lastModified().isAfter(Instant.now().minus(24, ChronoUnit.HOURS)))
                 .map(S3Object::key)
                 .collect(Collectors.toList());
-        
+
         List<List<String>> chunks = IntStream.range(0, (objectKeys.size() + 9) / 10)
                 .mapToObj(i -> objectKeys.subList(i * 10, Math.min(objectKeys.size(), (i + 1) * 10)))
                 .collect(Collectors.toList());
-        
+
         return new IteratorItemReader<>(chunks.iterator());
     }
-    
+
     @Bean
     public ItemProcessor<List<String>, List<String>> processor() {
-        return objectKeys -> objectKeys.parallelStream().map(key -> {
+        return objectKeys -> objectKeys.stream().map(key -> {
             try {
                 GetObjectRequest getObjectRequest = GetObjectRequest.builder()
                         .bucket("your-bucket-name")
                         .key(key)
                         .build();
-                
+
                 ResponseBytes<GetObjectResponse> objectBytes = s3Client.getObjectAsBytes(getObjectRequest);
                 String content = new String(objectBytes.asByteArray(), StandardCharsets.UTF_8);
-                
+
                 return "Processed: " + key + " - Content: " + content;
             } catch (Exception e) {
                 return "Error processing: " + key + " - " + e.getMessage();
             }
         }).collect(Collectors.toList());
     }
-    
+
     @Bean
     public ItemWriter<List<String>> writer() {
         return items -> {
@@ -85,42 +80,17 @@ public class BatchConfig {
             }
         };
     }
-    
-    @Bean
-    public ThreadPoolTaskExecutor taskExecutor() {
-        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(5);
-        executor.setMaxPoolSize(10);
-        executor.setQueueCapacity(25);
-        executor.initialize();
-        return executor;
-    }
-    
-    @Bean
-    public AsyncItemProcessor<List<String>, List<String>> asyncProcessor() {
-        AsyncItemProcessor<List<String>, List<String>> asyncProcessor = new AsyncItemProcessor<>();
-        asyncProcessor.setDelegate(processor());
-        asyncProcessor.setTaskExecutor(taskExecutor());
-        return asyncProcessor;
-    }
-    
-    @Bean
-    public AsyncItemWriter<List<String>> asyncWriter() {
-        AsyncItemWriter<List<String>> asyncWriter = new AsyncItemWriter<>();
-        asyncWriter.setDelegate(writer());
-        return asyncWriter;
-    }
-    
+
     @Bean
     public Step step1(JobRepository jobRepository, PlatformTransactionManager transactionManager) {
         return new StepBuilder("step1", jobRepository)
                 .<List<String>, List<String>>chunk(1, transactionManager)
                 .reader(s3ObjectReader())
-                .processor(asyncProcessor())
-                .writer(asyncWriter())
+                .processor(processor())
+                .writer(writer())
                 .build();
     }
-    
+
     @Bean
     public Job job(JobRepository jobRepository, Step step1) {
         return new JobBuilder("s3Job", jobRepository)
