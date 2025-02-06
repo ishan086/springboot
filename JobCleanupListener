@@ -1,0 +1,42 @@
+package com.example.batch.listener;
+
+import jakarta.annotation.PostConstruct;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.JobExecutionListener;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Component;
+
+@Component
+public class JobCleanupListener implements JobExecutionListener {
+
+    private final JdbcTemplate jdbcTemplate;
+
+    public JobCleanupListener(JdbcTemplate jdbcTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+    }
+
+    @PostConstruct
+    public void cleanupPreviousJobDetails() {
+        deletePreviousJobData();
+    }
+
+    @Override
+    public void beforeJob(JobExecution jobExecution) {
+        deletePreviousJobData();
+    }
+
+    private void deletePreviousJobData() {
+        jdbcTemplate.update("DELETE FROM BATCH_STEP_EXECUTION_CONTEXT");
+        jdbcTemplate.update("DELETE FROM BATCH_STEP_EXECUTION");
+        jdbcTemplate.update("DELETE FROM BATCH_JOB_EXECUTION_CONTEXT");
+        jdbcTemplate.update("DELETE FROM BATCH_JOB_EXECUTION_PARAMS");
+        jdbcTemplate.update("DELETE FROM BATCH_JOB_EXECUTION");
+        jdbcTemplate.update("DELETE FROM BATCH_JOB_INSTANCE");
+        System.out.println("Previous job execution details deleted.");
+    }
+
+    @Override
+    public void afterJob(JobExecution jobExecution) {
+        // No action needed after the job
+    }
+}
