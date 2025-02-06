@@ -1,0 +1,19 @@
+package com.example.batch.writer;
+
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.stereotype.Component;
+
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.List;
+
+@Component
+public class S3ObjectWriter implements ItemWriter<List<String>> {
+
+    @Override
+    public void write(List<? extends List<String>> items) throws Exception {
+        for (List<String> batch : items) {
+            Files.write(Paths.get("output.csv"), batch);
+        }
+    }
+}
