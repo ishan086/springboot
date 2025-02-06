@@ -16,23 +16,33 @@ public class JobCleanupListener implements JobExecutionListener {
     }
 
     @PostConstruct
-    public void cleanupPreviousJobDetails() {
-        deletePreviousJobData();
+    public void cleanupOnStartup() {
+        deletePreviousJobDataIfExists();
     }
 
     @Override
     public void beforeJob(JobExecution jobExecution) {
-        deletePreviousJobData();
+        deletePreviousJobDataIfExists();
     }
 
-    private void deletePreviousJobData() {
-        jdbcTemplate.update("DELETE FROM BATCH_STEP_EXECUTION_CONTEXT");
-        jdbcTemplate.update("DELETE FROM BATCH_STEP_EXECUTION");
-        jdbcTemplate.update("DELETE FROM BATCH_JOB_EXECUTION_CONTEXT");
-        jdbcTemplate.update("DELETE FROM BATCH_JOB_EXECUTION_PARAMS");
-        jdbcTemplate.update("DELETE FROM BATCH_JOB_EXECUTION");
-        jdbcTemplate.update("DELETE FROM BATCH_JOB_INSTANCE");
-        System.out.println("Previous job execution details deleted.");
+    private void deletePreviousJobDataIfExists() {
+        if (hasPreviousJobData()) {
+            System.out.println("Previous job execution data found. Deleting...");
+            jdbcTemplate.update("DELETE FROM BATCH_STEP_EXECUTION_CONTEXT");
+            jdbcTemplate.update("DELETE FROM BATCH_STEP_EXECUTION");
+            jdbcTemplate.update("DELETE FROM BATCH_JOB_EXECUTION_CONTEXT");
+            jdbcTemplate.update("DELETE FROM BATCH_JOB_EXECUTION_PARAMS");
+            jdbcTemplate.update("DELETE FROM BATCH_JOB_EXECUTION");
+            jdbcTemplate.update("DELETE FROM BATCH_JOB_INSTANCE");
+            System.out.println("Previous job execution data deleted.");
+        } else {
+            System.out.println("No previous job execution data found. Skipping deletion.");
+        }
+    }
+
+    private boolean hasPreviousJobData() {
+        Integer count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM BATCH_JOB_INSTANCE", Integer.class);
+        return count != null && count > 0;
     }
 
     @Override
