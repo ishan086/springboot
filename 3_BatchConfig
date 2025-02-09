@@ -1,0 +1,99 @@
+package com.example.batch.config;
+
+import com.example.batch.dto.S3ObjectDTO;
+import com.example.batch.processor.S3ObjectProcessor;
+import com.example.batch.reader.S3ObjectReader;
+import com.example.batch.writer.CsvItemWriter;
+import org.springframework.batch.core.*;
+import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
+import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.repository.support.JobRepositoryFactoryBean;
+import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.item.database.JpaItemWriter;
+import org.springframework.batch.item.database.builder.JpaItemWriterBuilder;
+import org.springframework.batch.item.support.ListItemReader;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.task.TaskExecutor;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.transaction.PlatformTransactionManager;
+
+import javax.persistence.EntityManagerFactory;
+import javax.sql.DataSource;
+
+@Configuration
+@EnableBatchProcessing
+public class BatchConfig {
+
+    @Bean
+    public JobRepository jobRepository(DataSource primaryDataSource, PlatformTransactionManager primaryTransactionManager) throws Exception {
+        JobRepositoryFactoryBean factoryBean = new JobRepositoryFactoryBean();
+        factoryBean.setDataSource(primaryDataSource);
+        factoryBean.setTransactionManager(primaryTransactionManager);
+        factoryBean.afterPropertiesSet();
+        return factoryBean.getObject();
+    }
+
+    @Bean
+    public ListItemReader<S3ObjectDTO> reader(S3ObjectReader s3ObjectReader) {
+        return new ListItemReader<>(s3ObjectReader.readS3Objects());
+    }
+
+    @Bean
+    public S3ObjectProcessor processor() {
+        return new S3ObjectProcessor();
+    }
+
+    @Bean
+    public JpaItemWriter<S3ObjectDTO> databaseWriter(@Qualifier("secondaryEntityManagerFactory") EntityManagerFactory entityManagerFactory) {
+        return new JpaItemWriterBuilder<S3ObjectDTO>()
+                .entityManagerFactory(entityManagerFactory)
+                .build();
+    }
+
+    @Bean
+    public CsvItemWriter csvWriter() {
+        return new CsvItemWriter("reports/Report_" + java.time.LocalDate.now() + ".csv");
+    }
+
+    @Bean
+    public TaskExecutor taskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(5);
+        executor.setMaxPoolSize(10);
+        executor.setQueueCapacity(20);
+        executor.setThreadNamePrefix("batch-thread-");
+        executor.initialize();
+        return executor;
+    }
+
+    @Bean
+    public Step processEmailsStep(JobRepository jobRepository, 
+                                  PlatformTransactionManager secondaryTransactionManager,
+                                  ListItemReader<S3ObjectDTO> reader,
+                                  S3ObjectProcessor processor,
+                                  JpaItemWriter<S3ObjectDTO> databaseWriter,
+                                  CsvItemWriter csvWriter,
+                                  TaskExecutor taskExecutor) {
+
+        return new StepBuilder("processEmailsStep", jobRepository)
+                .<S3ObjectDTO, S3ObjectDTO>chunk(10, secondaryTransactionManager)
+                .reader(reader)
+                .processor(processor)
+                .writer(items -> {
+                    databaseWriter.write(items);
+                    csvWriter.write(items);
+                })
+                .taskExecutor(taskExecutor) // Enables parallel processing
+                .build();
+    }
+
+    @Bean
+    public Job emailProcessingJob(JobRepository jobRepository, Step processEmailsStep) {
+        return new JobBuilder("emailProcessingJob", jobRepository)
+                .incrementer(new RunIdIncrementer())
+                .start(processEmailsStep)
+                .build();
+    }
+}
