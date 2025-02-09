@@ -1,0 +1,45 @@
+package com.example.batch.config;
+
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceBuilder;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.context.annotation.*;
+import org.springframework.orm.jpa.JpaTransactionManager;
+import org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean;
+import org.springframework.transaction.PlatformTransactionManager;
+
+import javax.sql.DataSource;
+import java.util.HashMap;
+import java.util.Map;
+
+@Configuration
+public class PrimaryDatabaseConfig {
+
+    @Bean(name = "primaryDataSource")
+    @ConfigurationProperties(prefix = "spring.datasource.primary")
+    public DataSource dataSource() {
+        return DataSourceBuilder.create().build();
+    }
+
+    @Bean(name = "primaryEntityManagerFactory")
+    public LocalContainerEntityManagerFactoryBean entityManagerFactory(
+            @Qualifier("primaryDataSource") DataSource dataSource) {
+
+        LocalContainerEntityManagerFactoryBean em = new LocalContainerEntityManagerFactoryBean();
+        em.setDataSource(dataSource);
+        em.setPackagesToScan("org.springframework.batch.core");
+
+        Map<String, Object> properties = new HashMap<>();
+        properties.put("hibernate.hbm2ddl.auto", "update");
+        properties.put("hibernate.dialect", "org.hibernate.dialect.H2Dialect");
+
+        em.setJpaPropertyMap(properties);
+        return em;
+    }
+
+    @Bean(name = "primaryTransactionManager")
+    public PlatformTransactionManager transactionManager(
+            @Qualifier("primaryEntityManagerFactory") LocalContainerEntityManagerFactoryBean entityManagerFactory) {
+        return new JpaTransactionManager(entityManagerFactory.getObject());
+    }
+}
