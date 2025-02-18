@@ -1,24 +1,18 @@
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-
 public class EmailContentDispositionFixer {
 
-    public static String fixContentDispositionFilename(InputStream inputStream) throws IOException {
+    public static String fixContentDispositionFilename(String email) {
+        String[] lines = email.split("\\r?\\n");
         StringBuilder result = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.toLowerCase().startsWith("content-disposition:")) {
-                    line = processContentDispositionLine(line);
-                }
-                appendLine(result, line);
+        for (String line : lines) {
+            if (line.toLowerCase().startsWith("content-disposition:")) {
+                line = processContentDispositionLine(line);
             }
+            appendLine(result, line);
         }
         return result.toString();
     }
 
     private static String processContentDispositionLine(String line) {
-        // Check if filename parameter is missing
         if (!line.matches("(?i).*\\bfilename\\s*=.*")) {
             return addMissingFilename(line);
         } else {
@@ -36,28 +30,26 @@ public class EmailContentDispositionFixer {
 
     private static String fixExistingFilename(String line) {
         return line.replaceAll(
-            "(?i)(filename\\s*=\\s*)(?:\"([^\"]*)\"|'([^']*)'|([^;]*?))(;|$)", 
+            "(?i)(filename\\s*=\\s*)(?:\"([^\"]*)\"|'([^']*)'|([^;\\s]*))\\s*(;|$)", 
             "$1\"$2$3$4\"$5"
         );
     }
 
     private static void appendLine(StringBuilder sb, String line) {
-        if (!sb.isEmpty()) {
+        if (sb.length() > 0) {
             sb.append("\r\n");
         }
         sb.append(line);
     }
 
-    public static void main(String[] args) throws IOException {
-        // Example usage with InputStream
+    public static void main(String[] args) {
         String email = "Content-Disposition: attachment\r\n"
-                      + "Content-Disposition: form-data; filename=unquoted.txt\r\n"
-                      + "Content-Disposition: inline; filename='singlequoted.txt'\r\n"
-                      + "Content-Disposition: attachment; filename=\"alreadyquoted.txt\"\r\n"
-                      + "Content-Disposition: attachment; filename=";
+                     + "Content-Disposition: form-data; filename=unquoted.txt\r\n"
+                     + "Content-Disposition: inline; filename='singlequoted.txt'\r\n"
+                     + "Content-Disposition: attachment; filename=\"alreadyquoted.txt\"\r\n"
+                     + "Content-Disposition: attachment; filename=";
 
-        InputStream inputStream = new ByteArrayInputStream(email.getBytes(StandardCharsets.UTF_8));
-        String fixedEmail = fixContentDispositionFilename(inputStream);
+        String fixedEmail = fixContentDispositionFilename(email);
         System.out.println(fixedEmail);
     }
 }
