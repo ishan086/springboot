@@ -1,0 +1,40 @@
+import java.util.Arrays;
+
+public class EmailContentDispositionFixer {
+
+    public static String fixContentDispositionFilename(String email) {
+        String[] lines = email.split("\\r?\\n");
+        StringBuilder sb = new StringBuilder();
+        for (String line : lines) {
+            if (line.toLowerCase().startsWith("content-disposition:")) {
+                // Check if filename parameter is missing
+                if (!line.matches("(?i).*\\bfilename\\s*=\\s*")) {
+                    line += "; filename=\"\"";
+                } else {
+                    // Apply regex to fix existing filename parameter
+                    line = line.replaceAll(
+                        "(?i)(filename\\s*=\\s*)(?:\"([^\"]*)\"|'([^']*)'|([^;]*?))(;|$)", 
+                        "$1\"$2$3$4\"$5"
+                    );
+                }
+            }
+            if (sb.length() > 0) {
+                sb.append("\r\n");
+            }
+            sb.append(line);
+        }
+        return sb.toString();
+    }
+
+    public static void main(String[] args) {
+        // Example usage
+        String email = "Content-Disposition: attachment\r\n"
+                     + "Content-Disposition: form-data; filename=unquoted.txt\r\n"
+                     + "Content-Disposition: inline; filename='singlequoted.txt'\r\n"
+                     + "Content-Disposition: attachment; filename=\"alreadyquoted.txt\"\r\n"
+                     + "Content-Disposition: attachment; filename=";
+
+        String fixedEmail = fixContentDispositionFilename(email);
+        System.out.println(fixedEmail);
+    }
+}
