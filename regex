@@ -1,40 +1,63 @@
-import java.util.Arrays;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
 
 public class EmailContentDispositionFixer {
 
-    public static String fixContentDispositionFilename(String email) {
-        String[] lines = email.split("\\r?\\n");
-        StringBuilder sb = new StringBuilder();
-        for (String line : lines) {
-            if (line.toLowerCase().startsWith("content-disposition:")) {
-                // Check if filename parameter is missing
-                if (!line.matches("(?i).*\\bfilename\\s*=\\s*")) {
-                    line += "; filename=\"\"";
-                } else {
-                    // Apply regex to fix existing filename parameter
-                    line = line.replaceAll(
-                        "(?i)(filename\\s*=\\s*)(?:\"([^\"]*)\"|'([^']*)'|([^;]*?))(;|$)", 
-                        "$1\"$2$3$4\"$5"
-                    );
+    public static String fixContentDispositionFilename(InputStream inputStream) throws IOException {
+        StringBuilder result = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.toLowerCase().startsWith("content-disposition:")) {
+                    line = processContentDispositionLine(line);
                 }
+                appendLine(result, line);
             }
-            if (sb.length() > 0) {
-                sb.append("\r\n");
-            }
-            sb.append(line);
         }
-        return sb.toString();
+        return result.toString();
     }
 
-    public static void main(String[] args) {
-        // Example usage
-        String email = "Content-Disposition: attachment\r\n"
-                     + "Content-Disposition: form-data; filename=unquoted.txt\r\n"
-                     + "Content-Disposition: inline; filename='singlequoted.txt'\r\n"
-                     + "Content-Disposition: attachment; filename=\"alreadyquoted.txt\"\r\n"
-                     + "Content-Disposition: attachment; filename=";
+    private static String processContentDispositionLine(String line) {
+        // Check if filename parameter is missing
+        if (!line.matches("(?i).*\\bfilename\\s*=.*")) {
+            return addMissingFilename(line);
+        } else {
+            return fixExistingFilename(line);
+        }
+    }
 
-        String fixedEmail = fixContentDispositionFilename(email);
+    private static String addMissingFilename(String line) {
+        if (line.trim().endsWith(";")) {
+            return line + " filename=\"\"";
+        } else {
+            return line + "; filename=\"\"";
+        }
+    }
+
+    private static String fixExistingFilename(String line) {
+        return line.replaceAll(
+            "(?i)(filename\\s*=\\s*)(?:\"([^\"]*)\"|'([^']*)'|([^;]*?))(;|$)", 
+            "$1\"$2$3$4\"$5"
+        );
+    }
+
+    private static void appendLine(StringBuilder sb, String line) {
+        if (!sb.isEmpty()) {
+            sb.append("\r\n");
+        }
+        sb.append(line);
+    }
+
+    public static void main(String[] args) throws IOException {
+        // Example usage with InputStream
+        String email = "Content-Disposition: attachment\r\n"
+                      + "Content-Disposition: form-data; filename=unquoted.txt\r\n"
+                      + "Content-Disposition: inline; filename='singlequoted.txt'\r\n"
+                      + "Content-Disposition: attachment; filename=\"alreadyquoted.txt\"\r\n"
+                      + "Content-Disposition: attachment; filename=";
+
+        InputStream inputStream = new ByteArrayInputStream(email.getBytes(StandardCharsets.UTF_8));
+        String fixedEmail = fixContentDispositionFilename(inputStream);
         System.out.println(fixedEmail);
     }
 }
