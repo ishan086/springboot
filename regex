@@ -29,8 +29,9 @@ public class EmailContentDispositionFixer {
     }
 
     private static String fixExistingFilename(String line) {
+        // Updated regex to handle values with spaces and special characters
         return line.replaceAll(
-            "(?i)(filename\\s*=\\s*)(?:\"([^\"]*)\"|'([^']*)'|([^;\\s]*))\\s*(;|$)", 
+            "(?i)(filename\\s*=\\s*)(?:\"([^\"]*)\"|'([^']*)'|([^;]*?))\\s*(;|$)", 
             "$1\"$2$3$4\"$5"
         );
     }
@@ -44,9 +45,9 @@ public class EmailContentDispositionFixer {
 
     public static void main(String[] args) {
         String email = "Content-Disposition: attachment\r\n"
-                     + "Content-Disposition: form-data; filename=unquoted.txt\r\n"
-                     + "Content-Disposition: inline; filename='singlequoted.txt'\r\n"
-                     + "Content-Disposition: attachment; filename=\"alreadyquoted.txt\"\r\n"
+                     + "Content-Disposition: form-data; filename=passport of anuj\r\n"
+                     + "Content-Disposition: inline; filename='2024 document v1.pdf'\r\n"
+                     + "Content-Disposition: attachment; filename=  unquoted with spaces.txt  \r\n"
                      + "Content-Disposition: attachment; filename=";
 
         String fixedEmail = fixContentDispositionFilename(email);
