@@ -45,19 +45,7 @@ CREATE TABLE batch_step_execution (
   FOREIGN KEY (job_execution_id) REFERENCES batch_job_execution(job_execution_id)
 );
 
--- Application Tables
-CREATE SEQUENCE report_key_sequence;
-
-CREATE TABLE s3_summary (
-    report_key BIGINT PRIMARY KEY DEFAULT nextval('report_key_sequence'),
-    total_objects BIGINT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE s3_monitoring (
-    id BIGSERIAL PRIMARY KEY,
-    object_key VARCHAR(2048) NOT NULL,
-    object_size VARCHAR(255) NOT NULL,
-    report_key BIGINT NOT NULL REFERENCES s3_summary(report_key),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+-- Sequences (Required for ID generation)
+CREATE SEQUENCE batch_job_seq;
+CREATE SEQUENCE batch_job_execution_seq;
+CREATE SEQUENCE batch_step_execution_seq;
