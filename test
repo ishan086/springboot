@@ -1,51 +1,84 @@
--- Spring Batch Metadata Tables (3-table schema)
-CREATE TABLE batch_job_instance (
-  job_instance_id BIGINT PRIMARY KEY,
-  version BIGINT,
-  job_name VARCHAR(100) NOT NULL,
-  job_key VARCHAR(32) NOT NULL,
-  UNIQUE(job_name, job_key)
-);
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import software.amazon.awssdk.auth.credentials.DefaultAWSCredentialsProviderChain;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.rds.RdsUtilities;
+import software.amazon.awssdk.services.rds.model.GenerateAuthenticationTokenRequest;
+import software.amazon.awssdk.utils.IoUtils;
 
-CREATE TABLE batch_job_execution (
-  job_execution_id BIGINT PRIMARY KEY,
-  version BIGINT,
-  job_instance_id BIGINT NOT NULL,
-  create_time TIMESTAMP NOT NULL,
-  start_time TIMESTAMP,
-  end_time TIMESTAMP,
-  status VARCHAR(10),
-  exit_code VARCHAR(2500),
-  exit_message VARCHAR(2500),
-  last_updated TIMESTAMP,
-  job_parameters JSONB,
-  execution_context JSONB,
-  FOREIGN KEY (job_instance_id) REFERENCES batch_job_instance(job_instance_id)
-);
+import javax.sql.DataSource;
+import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 
-CREATE TABLE batch_step_execution (
-  step_execution_id BIGINT PRIMARY KEY,
-  version BIGINT NOT NULL,
-  step_name VARCHAR(100) NOT NULL,
-  job_execution_id BIGINT NOT NULL,
-  start_time TIMESTAMP NOT NULL,
-  end_time TIMESTAMP,
-  status VARCHAR(10),
-  commit_count BIGINT,
-  read_count BIGINT,
-  filter_count BIGINT,
-  write_count BIGINT,
-  read_skip_count BIGINT,
-  write_skip_count BIGINT,
-  process_skip_count BIGINT,
-  rollback_count BIGINT,
-  exit_code VARCHAR(2500),
-  exit_message VARCHAR(2500),
-  execution_context JSONB,
-  FOREIGN KEY (job_execution_id) REFERENCES batch_job_execution(job_execution_id)
-);
+@Configuration
+public class DataSourceConfig {
 
--- Sequences (Required for ID generation)
-CREATE SEQUENCE batch_job_seq;
-CREATE SEQUENCE batch_job_execution_seq;
-CREATE SEQUENCE batch_step_execution_seq;
+    @Value("${aws.rds.endpoint}")
+    private String endpoint;
+
+    @Value("${aws.rds.port}")
+    private int port;
+
+    @Value("${aws.rds.dbname}")
+    private String dbname;
+
+    @Value("${aws.region}")
+    private String region;
+
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+    private volatile HikariDataSource dataSource;
+
+    @PostConstruct
+    public void init() {
+        refreshDataSource();
+        scheduler.scheduleAtFixedRate(this::refreshDataSource, 14, 14, TimeUnit.MINUTES);
+    }
+
+    @PreDestroy
+    public void destroy() {
+        scheduler.shutdown();
+        if (dataSource != null) {
+            dataSource.close();
+        }
+    }
+
+    private void refreshDataSource() {
+        RdsUtilities rdsUtilities = RdsUtilities.builder()
+                .credentialsProvider(DefaultAWSCredentialsProviderChain.create())
+                .region(Region.of(region))
+                .build();
+
+        String token = rdsUtilities.generateAuthenticationToken(
+                GenerateAuthenticationTokenRequest.builder()
+                        .username("iam_user")
+                        .hostname(endpoint)
+                        .port(port)
+                        .build()
+        );
+
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(String.format("jdbc:postgresql://%s:%d/%s", endpoint, port, dbname));
+        config.setUsername("iam_user");
+        config.setPassword(token);
+        config.setDriverClassName("org.postgresql.Driver");
+
+        if (dataSource != null) {
+            dataSource.close();
+        }
+        dataSource = new HikariDataSource(config);
+    }
+
+    @Bean
+    public DataSource dataSource() {
+        return () -> dataSource.getConnection();
+    }
+}
