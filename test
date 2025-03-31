@@ -1,18 +1,13 @@
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
 import software.amazon.awssdk.auth.credentials.DefaultAWSCredentialsProviderChain;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.rds.RdsUtilities;
 import software.amazon.awssdk.services.rds.model.GenerateAuthenticationTokenRequest;
-import software.amazon.awssdk.utils.IoUtils;
 
 import javax.sql.DataSource;
-import java.io.IOException;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.sql.Connection;
-import java.sql.SQLException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -22,63 +17,95 @@ import com.zaxxer.hikari.HikariDataSource;
 @Configuration
 public class DataSourceConfig {
 
-    @Value("${aws.rds.endpoint}")
-    private String endpoint;
+    // === Production (IAM) Configuration ===
+    @Profile("prod")
+    @Configuration
+    public static class ProdDataSourceConfig {
+        @Value("${aws.rds.endpoint}")
+        private String endpoint;
 
-    @Value("${aws.rds.port}")
-    private int port;
+        @Value("${aws.rds.port}")
+        private int port;
 
-    @Value("${aws.rds.dbname}")
-    private String dbname;
+        @Value("${aws.rds.dbname}")
+        private String dbname;
 
-    @Value("${aws.region}")
-    private String region;
+        @Value("${aws.region}")
+        private String region;
 
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
-    private volatile HikariDataSource dataSource;
+        @Value("${aws.rds.iam-user}")
+        private String iamUser;
 
-    @PostConstruct
-    public void init() {
-        refreshDataSource();
-        scheduler.scheduleAtFixedRate(this::refreshDataSource, 14, 14, TimeUnit.MINUTES);
-    }
+        private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+        private volatile HikariDataSource dataSource;
 
-    @PreDestroy
-    public void destroy() {
-        scheduler.shutdown();
-        if (dataSource != null) {
-            dataSource.close();
+        @PostConstruct
+        public void init() {
+            refreshDataSource();
+            scheduler.scheduleAtFixedRate(this::refreshDataSource, 14, 14, TimeUnit.MINUTES);
+        }
+
+        @PreDestroy
+        public void destroy() {
+            scheduler.shutdown();
+            if (dataSource != null) {
+                dataSource.close();
+            }
+        }
+
+        private void refreshDataSource() {
+            RdsUtilities rdsUtilities = RdsUtilities.builder()
+                    .credentialsProvider(DefaultAWSCredentialsProviderChain.create())
+                    .region(Region.of(region))
+                    .build();
+
+            String token = rdsUtilities.generateAuthenticationToken(
+                    GenerateAuthenticationTokenRequest.builder()
+                            .username(iamUser)
+                            .hostname(endpoint)
+                            .port(port)
+                            .build()
+            );
+
+            HikariConfig config = new HikariConfig();
+            config.setJdbcUrl(String.format("jdbc:postgresql://%s:%d/%s", endpoint, port, dbname));
+            config.setUsername(iamUser);
+            config.setPassword(token);
+            config.setDriverClassName("org.postgresql.Driver");
+
+            if (dataSource != null) {
+                dataSource.close();
+            }
+            dataSource = new HikariDataSource(config);
+        }
+
+        @Bean
+        public DataSource dataSource() {
+            return () -> dataSource.getConnection();
         }
     }
 
-    private void refreshDataSource() {
-        RdsUtilities rdsUtilities = RdsUtilities.builder()
-                .credentialsProvider(DefaultAWSCredentialsProviderChain.create())
-                .region(Region.of(region))
-                .build();
+    // === Local Configuration ===
+    @Profile("local")
+    @Configuration
+    public static class LocalDataSourceConfig {
+        @Value("${spring.datasource.url}")
+        private String jdbcUrl;
 
-        String token = rdsUtilities.generateAuthenticationToken(
-                GenerateAuthenticationTokenRequest.builder()
-                        .username("iam_user")
-                        .hostname(endpoint)
-                        .port(port)
-                        .build()
-        );
+        @Value("${spring.datasource.username}")
+        private String username;
 
-        HikariConfig config = new HikariConfig();
-        config.setJdbcUrl(String.format("jdbc:postgresql://%s:%d/%s", endpoint, port, dbname));
-        config.setUsername("iam_user");
-        config.setPassword(token);
-        config.setDriverClassName("org.postgresql.Driver");
+        @Value("${spring.datasource.password}")
+        private String password;
 
-        if (dataSource != null) {
-            dataSource.close();
+        @Bean
+        public DataSource dataSource() {
+            HikariConfig config = new HikariConfig();
+            config.setJdbcUrl(jdbcUrl);
+            config.setUsername(username);
+            config.setPassword(password);
+            config.setDriverClassName("org.postgresql.Driver");
+            return new HikariDataSource(config);
         }
-        dataSource = new HikariDataSource(config);
-    }
-
-    @Bean
-    public DataSource dataSource() {
-        return () -> dataSource.getConnection();
     }
 }
