@@ -1,6 +1,8 @@
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.ss.util.AreaReference;
 import org.apache.poi.ss.util.CellReference;
+import org.apache.poi.xssf.usermodel.XSSFSheet;
+import org.apache.poi.xssf.usermodel.XSSFTable;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -16,8 +18,8 @@ public class ExcelTableWriter {
         }
 
         // Create workbook and sheet
-        Workbook workbook = new XSSFWorkbook();
-        Sheet sheet = workbook.createSheet("Data");
+        XSSFWorkbook workbook = new XSSFWorkbook();
+        XSSFSheet sheet = workbook.createSheet("Data");
 
         // Get fields with ExcelColumn annotation, ordered
         Class<?> objectClass = objects.get(0).getClass();
@@ -70,7 +72,7 @@ public class ExcelTableWriter {
             }
         }
 
-        // Create Excel table
+        // Create Excel table (correct way)
         createExcelTable(workbook, sheet, orderedFields.size(), objects.size(), tableName);
 
         // Auto-size columns
@@ -112,23 +114,34 @@ public class ExcelTableWriter {
         return style;
     }
 
-    private static void createExcelTable(Workbook workbook, Sheet sheet, int colCount, int rowCount, String tableName) {
-        // Create table
-        Table table = sheet.createTable();
+    private static void createExcelTable(XSSFWorkbook workbook, XSSFSheet sheet, int colCount, int rowCount, String tableName) {
+        // Define the area of the table
+        AreaReference areaReference = new AreaReference(
+                new CellReference(0, 0),
+                new CellReference(rowCount, colCount - 1),  // -1 because columns are 0-based
+                SpreadsheetVersion.EXCEL2007);
+
+        // Create the table
+        XSSFTable table = sheet.createTable(areaReference);
         table.setName(tableName);
         table.setDisplayName(tableName);
 
-        // Set table style
-        TableStyleInfo style = (TableStyleInfo) table.getStyle();
-        style.setName("TableStyleMedium9");
-        style.setShowColumnStripes(false);
-        style.setShowRowStripes(true);
+        // Style the table
+        CTTable ctTable = table.getCTTable();
+        CTTableStyleInfo styleInfo = ctTable.addNewTableStyleInfo();
+        styleInfo.setName("TableStyleMedium9");
+        styleInfo.setShowColumnStripes(false);
+        styleInfo.setShowRowStripes(true);
 
-        // Set table area
-        AreaReference reference = new AreaReference(
-                new CellReference(0, 0),
-                new CellReference(rowCount, colCount - 1),
-                SpreadsheetVersion.EXCEL2007);
-        table.setCellReferences(reference);
+        // Add table columns with headers
+        Row headerRow = sheet.getRow(0);
+        CTTableColumns columns = ctTable.addNewTableColumns();
+        columns.setCount(colCount);
+        
+        for (int i = 0; i < colCount; i++) {
+            CTTableColumn column = columns.addNewTableColumn();
+            column.setId(i + 1);
+            column.setName(headerRow.getCell(i).getStringCellValue());
+        }
     }
 }
