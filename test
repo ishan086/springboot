@@ -1,53 +1,161 @@
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.ss.util.AreaReference;
 import org.apache.poi.ss.util.CellReference;
-import org.apache.poi.xssf.usermodel.XSSFSheet;
-import org.apache.poi.xssf.usermodel.XSSFTable;
-import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.apache.poi.xssf.streaming.SXSSFWorkbook;
+import org.apache.poi.xssf.streaming.SXSSFSheet;
+import org.apache.poi.xssf.streaming.SXSSFTable;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.*;
+
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.util.Date;
 import java.util.*;
 import java.util.stream.Collectors;
 
-public class ExcelTableWriter {
+public class LargeExcelTableWriter {
 
-    public static <T> void writeAsExcelTable(List<T> objects, String filePath, String tableName) throws IOException {
+    // Default window size - number of rows to keep in memory
+    private static final int DEFAULT_WINDOW_SIZE = 100;
+    
+    // Maximum column width in characters
+    private static final int MAX_COLUMN_WIDTH = 100;
+
+    public static <T> void writeLargeDatasetToExcel(List<T> objects, String filePath, String tableName) throws IOException {
+        // Validate inputs
+        validateInputs(objects, filePath, tableName);
+
+        // Create workbook with row access window
+        try (SXSSFWorkbook workbook = new SXSSFWorkbook(DEFAULT_WINDOW_SIZE)) {
+            // Disable compression for better performance with temporary files
+            workbook.setCompressTempFiles(true);
+            
+            SXSSFSheet sheet = workbook.createSheet("Data");
+            
+            // Configure sheet for optimal performance
+            sheet.setRandomAccessWindowSize(DEFAULT_WINDOW_SIZE);
+
+            // Get ordered fields with validation
+            List<Field> orderedFields = getValidatedFields(objects.get(0).getClass());
+
+            // Create styles
+            Map<Class<?>, CellStyle> styleMap = createStyleMap(workbook);
+
+            // Create header and data rows
+            createHeaderRow(sheet, orderedFields, styleMap.get(String.class));
+            createDataRows(sheet, objects, orderedFields, styleMap);
+
+            // Create table after data is written
+            createExcelTable(workbook, sheet, orderedFields.size(), objects.size(), tableName);
+
+            // Auto-size columns with protection
+            autoSizeColumnsSafely(sheet, orderedFields.size());
+
+            // Write to file with validation
+            writeWorkbook(workbook, filePath);
+            
+            // Clean up temporary files
+            workbook.dispose();
+        }
+    }
+
+    private static <T> void validateInputs(List<T> objects, String filePath, String tableName) {
         if (objects == null || objects.isEmpty()) {
             throw new IllegalArgumentException("Object list cannot be null or empty");
         }
+        if (filePath == null || !filePath.toLowerCase().endsWith(".xlsx")) {
+            throw new IllegalArgumentException("File path must end with .xlsx extension");
+        }
+        if (tableName == null || !tableName.matches("^[a-zA-Z_][a-zA-Z0-9_]*$")) {
+            throw new IllegalArgumentException("Table name must be valid Excel table name (letters, numbers, underscore, no spaces)");
+        }
+    }
 
-        // Create workbook and sheet
-        XSSFWorkbook workbook = new XSSFWorkbook();
-        XSSFSheet sheet = workbook.createSheet("Data");
-
-        // Get fields with ExcelColumn annotation, ordered
-        Class<?> objectClass = objects.get(0).getClass();
-        List<Field> orderedFields = Arrays.stream(objectClass.getDeclaredFields())
+    private static List<Field> getValidatedFields(Class<?> objectClass) {
+        List<Field> fields = Arrays.stream(objectClass.getDeclaredFields())
                 .filter(f -> f.isAnnotationPresent(ExcelColumn.class))
                 .sorted(Comparator.comparingInt(f -> f.getAnnotation(ExcelColumn.class).order()))
                 .collect(Collectors.toList());
 
-        // Create styles
-        CellStyle headerStyle = createHeaderStyle(workbook);
-        CellStyle dataStyle = createDataStyle(workbook);
+        if (fields.isEmpty()) {
+            throw new IllegalStateException("No fields marked with @ExcelColumn annotation found");
+        }
 
-        // Create header row
+        return fields;
+    }
+
+    private static Map<Class<?>, CellStyle> createStyleMap(SXSSFWorkbook workbook) {
+        Map<Class<?>, CellStyle> styleMap = new HashMap<>();
+        
+        // Header style
+        CellStyle headerStyle = workbook.createCellStyle();
+        Font headerFont = workbook.createFont();
+        headerFont.setBold(true);
+        headerFont.setColor(IndexedColors.WHITE.getIndex());
+        headerStyle.setFont(headerFont);
+        headerStyle.setFillForegroundColor(IndexedColors.DARK_BLUE.getIndex());
+        headerStyle.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+        headerStyle.setBorderBottom(BorderStyle.THIN);
+        headerStyle.setBorderTop(BorderStyle.THIN);
+        headerStyle.setBorderLeft(BorderStyle.THIN);
+        headerStyle.setBorderRight(BorderStyle.THIN);
+        headerStyle.setAlignment(HorizontalAlignment.CENTER);
+        styleMap.put(String.class, headerStyle);
+
+        // Data styles
+        CellStyle defaultStyle = createDataStyle(workbook, null);
+        styleMap.put(Object.class, defaultStyle);
+
+        CellStyle numberStyle = createDataStyle(workbook, null);
+        numberStyle.setAlignment(HorizontalAlignment.RIGHT);
+        styleMap.put(Number.class, numberStyle);
+
+        CellStyle dateStyle = createDataStyle(workbook, 
+            workbook.createDataFormat().getFormat("yyyy-mm-dd"));
+        styleMap.put(Date.class, dateStyle);
+
+        CellStyle booleanStyle = createDataStyle(workbook, null);
+        booleanStyle.setAlignment(HorizontalAlignment.CENTER);
+        styleMap.put(Boolean.class, booleanStyle);
+
+        return styleMap;
+    }
+
+    private static CellStyle createDataStyle(Workbook workbook, Short dataFormat) {
+        CellStyle style = workbook.createCellStyle();
+        style.setBorderBottom(BorderStyle.THIN);
+        style.setBorderTop(BorderStyle.THIN);
+        style.setBorderLeft(BorderStyle.THIN);
+        style.setBorderRight(BorderStyle.THIN);
+        style.setAlignment(HorizontalAlignment.LEFT);
+        if (dataFormat != null) {
+            style.setDataFormat(dataFormat);
+        }
+        return style;
+    }
+
+    private static void createHeaderRow(SXSSFSheet sheet, List<Field> orderedFields, CellStyle headerStyle) {
         Row headerRow = sheet.createRow(0);
         for (int i = 0; i < orderedFields.size(); i++) {
             Field field = orderedFields.get(i);
             ExcelColumn annotation = field.getAnnotation(ExcelColumn.class);
-            String headerName = annotation.header().isEmpty() ? field.getName() : annotation.header();
+            String headerName = annotation.header().isEmpty() ? 
+                field.getName() : annotation.header();
             
             Cell cell = headerRow.createCell(i);
             cell.setCellValue(headerName);
             cell.setCellStyle(headerStyle);
         }
+    }
 
-        // Create data rows
-        for (int rowNum = 0; rowNum < objects.size(); rowNum++) {
-            T obj = objects.get(rowNum);
-            Row row = sheet.createRow(rowNum + 1);
+    private static <T> void createDataRows(SXSSFSheet sheet, List<T> objects, 
+            List<Field> orderedFields, Map<Class<?>, CellStyle> styleMap) {
+        // Track rows to flush periodically
+        int rowCount = 0;
+        final int flushInterval = DEFAULT_WINDOW_SIZE / 2;
+        
+        for (T obj : objects) {
+            Row row = sheet.createRow(++rowCount); // Start from row 1 (after header)
 
             for (int colNum = 0; colNum < orderedFields.size(); colNum++) {
                 Field field = orderedFields.get(colNum);
@@ -55,93 +163,103 @@ public class ExcelTableWriter {
                     field.setAccessible(true);
                     Object value = field.get(obj);
                     Cell cell = row.createCell(colNum);
-                    cell.setCellStyle(dataStyle);
 
                     if (value != null) {
-                        if (value instanceof Number) {
-                            cell.setCellValue(((Number) value).doubleValue());
-                        } else if (value instanceof Boolean) {
-                            cell.setCellValue((Boolean) value);
-                        } else {
-                            cell.setCellValue(value.toString());
-                        }
+                        setCellValueWithStyle(cell, value, styleMap);
                     }
                 } catch (IllegalAccessException e) {
                     throw new RuntimeException("Error accessing field value", e);
                 }
             }
-        }
-
-        // Create Excel table (correct way)
-        createExcelTable(workbook, sheet, orderedFields.size(), objects.size(), tableName);
-
-        // Auto-size columns
-        for (int i = 0; i < orderedFields.size(); i++) {
-            sheet.autoSizeColumn(i);
-        }
-
-        // Write to file
-        try (FileOutputStream fileOut = new FileOutputStream(filePath)) {
-            workbook.write(fileOut);
-        } finally {
-            workbook.close();
+            
+            // Periodically flush rows to disk to manage memory
+            if (rowCount % flushInterval == 0) {
+                try {
+                    ((SXSSFSheet)sheet).flushRows(flushInterval);
+                } catch (IOException e) {
+                    throw new RuntimeException("Error flushing rows to disk", e);
+                }
+            }
         }
     }
 
-    private static CellStyle createHeaderStyle(Workbook workbook) {
-        CellStyle style = workbook.createCellStyle();
-        Font font = workbook.createFont();
-        font.setBold(true);
-        font.setColor(IndexedColors.WHITE.getIndex());
-        style.setFont(font);
-        style.setFillForegroundColor(IndexedColors.DARK_BLUE.getIndex());
-        style.setFillPattern(FillPatternType.SOLID_FOREGROUND);
-        style.setBorderBottom(BorderStyle.THIN);
-        style.setBorderTop(BorderStyle.THIN);
-        style.setBorderLeft(BorderStyle.THIN);
-        style.setBorderRight(BorderStyle.THIN);
-        style.setAlignment(HorizontalAlignment.CENTER);
-        return style;
+    private static void setCellValueWithStyle(Cell cell, Object value, Map<Class<?>, CellStyle> styleMap) {
+        // Determine value type and apply appropriate style
+        Class<?> valueType = value.getClass();
+        CellStyle style = styleMap.getOrDefault(valueType, 
+            styleMap.get(Number.class.isAssignableFrom(valueType) ? Number.class :
+            Date.class.isAssignableFrom(valueType) ? Date.class :
+            Boolean.class.isAssignableFrom(valueType) ? Boolean.class :
+            Object.class));
+
+        cell.setCellStyle(style);
+
+        if (value instanceof Number) {
+            cell.setCellValue(((Number) value).doubleValue());
+        } else if (value instanceof Boolean) {
+            cell.setCellValue((Boolean) value);
+        } else if (value instanceof Date) {
+            cell.setCellValue((Date) value);
+        } else {
+            cell.setCellValue(value.toString());
+        }
     }
 
-    private static CellStyle createDataStyle(Workbook workbook) {
-        CellStyle style = workbook.createCellStyle();
-        style.setBorderBottom(BorderStyle.THIN);
-        style.setBorderTop(BorderStyle.THIN);
-        style.setBorderLeft(BorderStyle.THIN);
-        style.setBorderRight(BorderStyle.THIN);
-        style.setAlignment(HorizontalAlignment.LEFT);
-        return style;
-    }
-
-    private static void createExcelTable(XSSFWorkbook workbook, XSSFSheet sheet, int colCount, int rowCount, String tableName) {
-        // Define the area of the table
-        AreaReference areaReference = new AreaReference(
+    private static void createExcelTable(SXSSFWorkbook workbook, SXSSFSheet sheet, 
+            int colCount, int rowCount, String tableName) {
+        // Define table area with proper bounds checking
+        int lastRow = Math.min(rowCount, sheet.getLastRowNum());
+        int lastCol = Math.min(colCount - 1, 16383); // Excel column limit
+        
+        AreaReference areaReference = workbook.getCreationHelper().createAreaReference(
                 new CellReference(0, 0),
-                new CellReference(rowCount, colCount - 1),  // -1 because columns are 0-based
+                new CellReference(lastRow, lastCol),
                 SpreadsheetVersion.EXCEL2007);
 
-        // Create the table
-        XSSFTable table = sheet.createTable(areaReference);
+        // Create and configure table
+        SXSSFTable table = sheet.createTable(areaReference);
         table.setName(tableName);
         table.setDisplayName(tableName);
 
-        // Style the table
         CTTable ctTable = table.getCTTable();
         CTTableStyleInfo styleInfo = ctTable.addNewTableStyleInfo();
         styleInfo.setName("TableStyleMedium9");
         styleInfo.setShowColumnStripes(false);
         styleInfo.setShowRowStripes(true);
 
-        // Add table columns with headers
-        Row headerRow = sheet.getRow(0);
+        // Explicitly set table properties
+        ctTable.setTotalsRowShown(false);
+        ctTable.setHeaderRowCount(1);
+        ctTable.setRef(areaReference.formatAsString());
+
+        // Configure columns with proper IDs and names
         CTTableColumns columns = ctTable.addNewTableColumns();
         columns.setCount(colCount);
         
-        for (int i = 0; i < colCount; i++) {
+        Row headerRow = sheet.getRow(0);
+        for (int i = 0; i < colCount && i < headerRow.getLastCellNum(); i++) {
             CTTableColumn column = columns.addNewTableColumn();
             column.setId(i + 1);
             column.setName(headerRow.getCell(i).getStringCellValue());
+        }
+    }
+
+    private static void autoSizeColumnsSafely(SXSSFSheet sheet, int columnCount) {
+        // Auto-size columns but limit maximum width
+        for (int i = 0; i < columnCount; i++) {
+            sheet.trackColumnForAutoSizing(i);
+            sheet.autoSizeColumn(i);
+            int currentWidth = sheet.getColumnWidth(i);
+            int maxWidth = MAX_COLUMN_WIDTH * 256; // Convert characters to Excel units
+            if (currentWidth > maxWidth) {
+                sheet.setColumnWidth(i, maxWidth);
+            }
+        }
+    }
+
+    private static void writeWorkbook(SXSSFWorkbook workbook, String filePath) throws IOException {
+        try (FileOutputStream fileOut = new FileOutputStream(filePath)) {
+            workbook.write(fileOut);
         }
     }
 }
