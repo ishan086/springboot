@@ -13,7 +13,7 @@ public class LargeExcelWriter {
     private static final int FLUSH_INTERVAL = 50;
     private static final int MAX_COLUMN_WIDTH = 100;
 
-    public static <T> void writeLargeDataset(List<T> objects, String filePath) throws IOException {
+    public static <T, S> void writeLargeDataset(List<T> objects, S summaryObject, String filePath) throws IOException {
         // Validate inputs
         if (objects == null || objects.isEmpty()) {
             throw new IllegalArgumentException("Object list cannot be null or empty");
@@ -22,30 +22,45 @@ public class LargeExcelWriter {
             throw new IllegalArgumentException("File path must end with .xlsx extension");
         }
 
-        try (SXSSFWorkbook workbook = new SXSSFWorkbook(WINDOW_SIZE)) {
+        SXSSFWorkbook workbook = null;
+        try {
+            workbook = new SXSSFWorkbook(WINDOW_SIZE);
             workbook.setCompressTempFiles(true);
-            SXSSFSheet sheet = workbook.createSheet("Data");
-            sheet.setRandomAccessWindowSize(WINDOW_SIZE);
 
-            // Get ordered fields
+            // Create main data sheet with frozen header
+            SXSSFSheet dataSheet = workbook.createSheet("Data");
+            dataSheet.setRandomAccessWindowSize(WINDOW_SIZE);
+            dataSheet.createFreezePane(0, 1, 0, 1); // Freeze header row
+
+            // Get ordered fields for main data
             List<Field> orderedFields = getOrderedFields(objects.get(0).getClass());
 
             // Create styles
             CellStyle headerStyle = createHeaderStyle(workbook);
             Map<Class<?>, CellStyle> dataStyles = createDataStyles(workbook);
 
-            // Create header row (with header style)
-            createHeaderRow(sheet, orderedFields, headerStyle);
+            // Create header row for data sheet
+            createHeaderRow(dataSheet, orderedFields, headerStyle);
 
-            // Write data rows (with appropriate data styles)
-            writeDataRows(sheet, objects, orderedFields, dataStyles);
+            // Write data rows with proper timestamp handling
+            writeDataRows(dataSheet, objects, orderedFields, dataStyles, workbook);
 
-            // Auto-size columns
-            autoSizeColumns(sheet, orderedFields.size());
+            // Auto-size columns in data sheet
+            autoSizeColumns(dataSheet, orderedFields.size());
+
+            // Create summary sheet if summary object is provided
+            if (summaryObject != null) {
+                createSummarySheet(workbook, summaryObject, headerStyle);
+            }
 
             // Write to file
-            writeWorkbook(workbook, filePath);
-            workbook.dispose();
+            try (FileOutputStream fos = new FileOutputStream(filePath)) {
+                workbook.write(fos);
+            }
+        } finally {
+            if (workbook != null) {
+                workbook.close();
+            }
         }
     }
 
@@ -65,6 +80,10 @@ public class LargeExcelWriter {
         style.setFillForegroundColor(IndexedColors.DARK_BLUE.getIndex());
         style.setFillPattern(FillPatternType.SOLID_FOREGROUND);
         style.setAlignment(HorizontalAlignment.CENTER);
+        style.setBorderBottom(BorderStyle.THIN);
+        style.setBorderTop(BorderStyle.THIN);
+        style.setBorderLeft(BorderStyle.THIN);
+        style.setBorderRight(BorderStyle.THIN);
         return style;
     }
 
@@ -81,7 +100,7 @@ public class LargeExcelWriter {
         numberStyle.setAlignment(HorizontalAlignment.RIGHT);
         styles.put(Number.class, numberStyle);
 
-        // Date style
+        // Date style (base format - will be overridden for timestamps)
         CellStyle dateStyle = workbook.createCellStyle();
         dateStyle.setDataFormat(workbook.createDataFormat().getFormat("yyyy-mm-dd"));
         styles.put(Date.class, dateStyle);
@@ -103,12 +122,12 @@ public class LargeExcelWriter {
             
             Cell cell = headerRow.createCell(i);
             cell.setCellValue(header);
-            cell.setCellStyle(headerStyle);  // Only header cells get this style
+            cell.setCellStyle(headerStyle);
         }
     }
 
     private static <T> void writeDataRows(SXSSFSheet sheet, List<T> objects, 
-            List<Field> fields, Map<Class<?>, CellStyle> dataStyles) {
+            List<Field> fields, Map<Class<?>, CellStyle> dataStyles, Workbook workbook) {
         int rowCount = 0;
         
         for (T obj : objects) {
@@ -122,7 +141,7 @@ public class LargeExcelWriter {
                     Cell cell = row.createCell(i);
                     
                     if (value != null) {
-                        setCellValue(cell, value, dataStyles);  // Data cells get their own styles
+                        setCellValue(cell, value, dataStyles, workbook);
                     }
                 } catch (IllegalAccessException e) {
                     throw new RuntimeException("Error accessing field value", e);
@@ -139,7 +158,8 @@ public class LargeExcelWriter {
         }
     }
 
-    private static void setCellValue(Cell cell, Object value, Map<Class<?>, CellStyle> dataStyles) {
+    private static void setCellValue(Cell cell, Object value, 
+            Map<Class<?>, CellStyle> dataStyles, Workbook workbook) {
         Class<?> valueType = value.getClass();
         CellStyle style = dataStyles.getOrDefault(valueType, 
             dataStyles.get(Number.class.isAssignableFrom(valueType) ? Number.class :
@@ -147,16 +167,23 @@ public class LargeExcelWriter {
             Boolean.class.isAssignableFrom(valueType) ? Boolean.class :
             Object.class));
         
-        cell.setCellStyle(style);
-        
-        if (value instanceof Number) {
-            cell.setCellValue(((Number) value).doubleValue());
-        } else if (value instanceof Boolean) {
-            cell.setCellValue((Boolean) value);
-        } else if (value instanceof Date) {
+        // Special handling for dates to include timestamp
+        if (value instanceof Date) {
+            CellStyle dateTimeStyle = workbook.createCellStyle();
+            dateTimeStyle.cloneStyleFrom(style);
+            dateTimeStyle.setDataFormat(workbook.createDataFormat().getFormat("yyyy-mm-dd hh:mm"));
+            cell.setCellStyle(dateTimeStyle);
             cell.setCellValue((Date) value);
         } else {
-            cell.setCellValue(value.toString());
+            cell.setCellStyle(style);
+            
+            if (value instanceof Number) {
+                cell.setCellValue(((Number) value).doubleValue());
+            } else if (value instanceof Boolean) {
+                cell.setCellValue((Boolean) value);
+            } else {
+                cell.setCellValue(value.toString());
+            }
         }
     }
 
@@ -165,16 +192,58 @@ public class LargeExcelWriter {
             sheet.trackColumnForAutoSizing(i);
             sheet.autoSizeColumn(i);
             int currentWidth = sheet.getColumnWidth(i);
-            int maxWidth = MAX_COLUMN_WIDTH * 256;
+            int maxWidth = MAX_COLUMN_WIDTH * 256; // Convert to Excel units
             if (currentWidth > maxWidth) {
                 sheet.setColumnWidth(i, maxWidth);
             }
         }
     }
 
-    private static void writeWorkbook(SXSSFWorkbook workbook, String filePath) throws IOException {
-        try (FileOutputStream fos = new FileOutputStream(filePath)) {
-            workbook.write(fos);
+    private static <S> void createSummarySheet(SXSSFWorkbook workbook, S summaryObject, CellStyle headerStyle) {
+        SXSSFSheet summarySheet = workbook.createSheet("Summary");
+        summarySheet.setRandomAccessWindowSize(10);
+
+        // Create header
+        Row headerRow = summarySheet.createRow(0);
+        headerRow.createCell(0).setCellValue("Field Name");
+        headerRow.createCell(1).setCellValue("Value");
+        headerRow.getCell(0).setCellStyle(headerStyle);
+        headerRow.getCell(1).setCellStyle(headerStyle);
+
+        // Create date style for 24-hour timestamp
+        CellStyle timestampStyle = workbook.createCellStyle();
+        timestampStyle.setDataFormat(workbook.createDataFormat().getFormat("yyyy-mm-dd hh:mm"));
+
+        // Write summary data
+        int rowNum = 1;
+        for (Field field : summaryObject.getClass().getDeclaredFields()) {
+            try {
+                field.setAccessible(true);
+                Object value = field.get(summaryObject);
+                
+                Row row = summarySheet.createRow(rowNum++);
+                row.createCell(0).setCellValue(field.getName());
+                
+                if (value != null) {
+                    Cell valueCell = row.createCell(1);
+                    if (value instanceof Date) {
+                        valueCell.setCellValue((Date) value);
+                        valueCell.setCellStyle(timestampStyle);
+                    } else if (value instanceof Number) {
+                        valueCell.setCellValue(((Number) value).doubleValue());
+                    } else if (value instanceof Boolean) {
+                        valueCell.setCellValue((Boolean) value);
+                    } else {
+                        valueCell.setCellValue(value.toString());
+                    }
+                }
+            } catch (IllegalAccessException e) {
+                throw new RuntimeException("Error accessing summary field", e);
+            }
         }
+
+        // Auto-size columns
+        summarySheet.autoSizeColumn(0);
+        summarySheet.autoSizeColumn(1);
     }
 }
