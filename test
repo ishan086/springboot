@@ -1,20 +1,17 @@
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.streaming.SXSSFWorkbook;
 import org.apache.poi.xssf.streaming.SXSSFSheet;
-
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.util.Date;
 import java.util.*;
-import java.util.stream.Collectors;
 
 public class LargeExcelWriter {
 
-    // Configuration constants
-    private static final int WINDOW_SIZE = 100; // Rows to keep in memory
-    private static final int FLUSH_INTERVAL = 50; // Rows to process before flushing
-    private static final int MAX_COLUMN_WIDTH = 100; // Max column width in characters
+    private static final int WINDOW_SIZE = 100;
+    private static final int FLUSH_INTERVAL = 50;
+    private static final int MAX_COLUMN_WIDTH = 100;
 
     public static <T> void writeLargeDataset(List<T> objects, String filePath) throws IOException {
         // Validate inputs
@@ -25,10 +22,8 @@ public class LargeExcelWriter {
             throw new IllegalArgumentException("File path must end with .xlsx extension");
         }
 
-        // Create workbook with row access window
         try (SXSSFWorkbook workbook = new SXSSFWorkbook(WINDOW_SIZE)) {
-            workbook.setCompressTempFiles(true); // Compress temporary files
-            
+            workbook.setCompressTempFiles(true);
             SXSSFSheet sheet = workbook.createSheet("Data");
             sheet.setRandomAccessWindowSize(WINDOW_SIZE);
 
@@ -36,21 +31,20 @@ public class LargeExcelWriter {
             List<Field> orderedFields = getOrderedFields(objects.get(0).getClass());
 
             // Create styles
-            Map<Class<?>, CellStyle> styleMap = createStyleMap(workbook);
+            CellStyle headerStyle = createHeaderStyle(workbook);
+            Map<Class<?>, CellStyle> dataStyles = createDataStyles(workbook);
 
-            // Create header row
-            createHeaderRow(sheet, orderedFields, styleMap.get(String.class));
+            // Create header row (with header style)
+            createHeaderRow(sheet, orderedFields, headerStyle);
 
-            // Write data rows
-            writeDataRows(sheet, objects, orderedFields, styleMap);
+            // Write data rows (with appropriate data styles)
+            writeDataRows(sheet, objects, orderedFields, dataStyles);
 
             // Auto-size columns
             autoSizeColumns(sheet, orderedFields.size());
 
             // Write to file
             writeWorkbook(workbook, filePath);
-            
-            // Clean up temporary files
             workbook.dispose();
         }
     }
@@ -62,46 +56,45 @@ public class LargeExcelWriter {
                 .collect(Collectors.toList());
     }
 
-    private static Map<Class<?>, CellStyle> createStyleMap(SXSSFWorkbook workbook) {
-        Map<Class<?>, CellStyle> styleMap = new HashMap<>();
-        
-        // Header style
-        CellStyle headerStyle = workbook.createCellStyle();
-        Font headerFont = workbook.createFont();
-        headerFont.setBold(true);
-        headerFont.setColor(IndexedColors.WHITE.getIndex());
-        headerStyle.setFont(headerFont);
-        headerStyle.setFillForegroundColor(IndexedColors.DARK_BLUE.getIndex());
-        headerStyle.setFillPattern(FillPatternType.SOLID_FOREGROUND);
-        headerStyle.setAlignment(HorizontalAlignment.CENTER);
-        styleMap.put(String.class, headerStyle);
-
-        // Data styles
-        styleMap.put(Object.class, createDataStyle(workbook, null, HorizontalAlignment.LEFT));
-        
-        CellStyle numberStyle = createDataStyle(workbook, null, HorizontalAlignment.RIGHT);
-        styleMap.put(Number.class, numberStyle);
-        
-        CellStyle dateStyle = createDataStyle(workbook, 
-            workbook.createDataFormat().getFormat("yyyy-mm-dd"), HorizontalAlignment.LEFT);
-        styleMap.put(Date.class, dateStyle);
-        
-        CellStyle booleanStyle = createDataStyle(workbook, null, HorizontalAlignment.CENTER);
-        styleMap.put(Boolean.class, booleanStyle);
-        
-        return styleMap;
-    }
-
-    private static CellStyle createDataStyle(Workbook workbook, Short dataFormat, HorizontalAlignment alignment) {
+    private static CellStyle createHeaderStyle(Workbook workbook) {
         CellStyle style = workbook.createCellStyle();
-        style.setAlignment(alignment);
-        if (dataFormat != null) {
-            style.setDataFormat(dataFormat);
-        }
+        Font font = workbook.createFont();
+        font.setBold(true);
+        font.setColor(IndexedColors.WHITE.getIndex());
+        style.setFont(font);
+        style.setFillForegroundColor(IndexedColors.DARK_BLUE.getIndex());
+        style.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+        style.setAlignment(HorizontalAlignment.CENTER);
         return style;
     }
 
-    private static void createHeaderRow(SXSSFSheet sheet, List<Field> fields, CellStyle style) {
+    private static Map<Class<?>, CellStyle> createDataStyles(Workbook workbook) {
+        Map<Class<?>, CellStyle> styles = new HashMap<>();
+        
+        // Default style
+        CellStyle defaultStyle = workbook.createCellStyle();
+        defaultStyle.setAlignment(HorizontalAlignment.LEFT);
+        styles.put(Object.class, defaultStyle);
+
+        // Number style
+        CellStyle numberStyle = workbook.createCellStyle();
+        numberStyle.setAlignment(HorizontalAlignment.RIGHT);
+        styles.put(Number.class, numberStyle);
+
+        // Date style
+        CellStyle dateStyle = workbook.createCellStyle();
+        dateStyle.setDataFormat(workbook.createDataFormat().getFormat("yyyy-mm-dd"));
+        styles.put(Date.class, dateStyle);
+
+        // Boolean style
+        CellStyle booleanStyle = workbook.createCellStyle();
+        booleanStyle.setAlignment(HorizontalAlignment.CENTER);
+        styles.put(Boolean.class, booleanStyle);
+
+        return styles;
+    }
+
+    private static void createHeaderRow(SXSSFSheet sheet, List<Field> fields, CellStyle headerStyle) {
         Row headerRow = sheet.createRow(0);
         for (int i = 0; i < fields.size(); i++) {
             Field field = fields.get(i);
@@ -110,12 +103,12 @@ public class LargeExcelWriter {
             
             Cell cell = headerRow.createCell(i);
             cell.setCellValue(header);
-            cell.setCellStyle(style);
+            cell.setCellStyle(headerStyle);  // Only header cells get this style
         }
     }
 
     private static <T> void writeDataRows(SXSSFSheet sheet, List<T> objects, 
-            List<Field> fields, Map<Class<?>, CellStyle> styleMap) {
+            List<Field> fields, Map<Class<?>, CellStyle> dataStyles) {
         int rowCount = 0;
         
         for (T obj : objects) {
@@ -129,14 +122,13 @@ public class LargeExcelWriter {
                     Cell cell = row.createCell(i);
                     
                     if (value != null) {
-                        setCellValue(cell, value, styleMap);
+                        setCellValue(cell, value, dataStyles);  // Data cells get their own styles
                     }
                 } catch (IllegalAccessException e) {
                     throw new RuntimeException("Error accessing field value", e);
                 }
             }
             
-            // Periodically flush to disk
             if (rowCount % FLUSH_INTERVAL == 0) {
                 try {
                     sheet.flushRows(FLUSH_INTERVAL);
@@ -147,10 +139,10 @@ public class LargeExcelWriter {
         }
     }
 
-    private static void setCellValue(Cell cell, Object value, Map<Class<?>, CellStyle> styleMap) {
+    private static void setCellValue(Cell cell, Object value, Map<Class<?>, CellStyle> dataStyles) {
         Class<?> valueType = value.getClass();
-        CellStyle style = styleMap.getOrDefault(valueType, 
-            styleMap.get(Number.class.isAssignableFrom(valueType) ? Number.class :
+        CellStyle style = dataStyles.getOrDefault(valueType, 
+            dataStyles.get(Number.class.isAssignableFrom(valueType) ? Number.class :
             Date.class.isAssignableFrom(valueType) ? Date.class :
             Boolean.class.isAssignableFrom(valueType) ? Boolean.class :
             Object.class));
@@ -172,10 +164,8 @@ public class LargeExcelWriter {
         for (int i = 0; i < columnCount; i++) {
             sheet.trackColumnForAutoSizing(i);
             sheet.autoSizeColumn(i);
-            
-            // Limit column width
             int currentWidth = sheet.getColumnWidth(i);
-            int maxWidth = MAX_COLUMN_WIDTH * 256; // Convert to Excel units
+            int maxWidth = MAX_COLUMN_WIDTH * 256;
             if (currentWidth > maxWidth) {
                 sheet.setColumnWidth(i, maxWidth);
             }
