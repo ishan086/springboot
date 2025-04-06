@@ -1,65 +1,187 @@
-private static <S> void createSummarySheet(SXSSFWorkbook workbook, S summaryObject) throws IOException {
-    SXSSFSheet summarySheet = workbook.createSheet("Summary");
-    try {
-        summarySheet.setRandomAccessWindowSize(10);
-        CellStyle headerStyle = createHeaderStyle(workbook);
-        
-        // Create header
-        Row headerRow = summarySheet.createRow(0);
-        headerRow.createCell(0).setCellValue("Field Name");
-        headerRow.createCell(1).setCellValue("Value");
-        headerRow.getCell(0).setCellStyle(headerStyle);
-        headerRow.getCell(1).setCellStyle(headerStyle);
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.*;
+import java.nio.file.*;
+import java.time.*;
+import java.util.*;
+import java.util.regex.*;
 
-        // Create date style for 24-hour timestamp
-        CellStyle timestampStyle = workbook.createCellStyle();
-        timestampStyle.setDataFormat(workbook.createDataFormat().getFormat("yyyy-mm-dd hh:mm"));
+public class S3FlexibleUploader {
 
-        // Get fields in ExcelColumn order
-        List<Field> orderedFields = Arrays.stream(summaryObject.getClass().getDeclaredFields())
-                .filter(f -> f.isAnnotationPresent(ExcelColumn.class))
-                .sorted(Comparator.comparingInt(f -> f.getAnnotation(ExcelColumn.class).order()))
-                .collect(Collectors.toList());
+    private final S3Client s3Client;
+    private final String bucketName;
+    private final Path sourceDir;
 
-        // Write summary data in specified order
-        int rowNum = 1;
-        for (Field field : orderedFields) {
-            try {
-                field.setAccessible(true);
-                Object value = field.get(summaryObject);
-                ExcelColumn annotation = field.getAnnotation(ExcelColumn.class);
-                
-                Row row = summarySheet.createRow(rowNum++);
-                
-                // Use annotation header if specified, otherwise use field name
-                String displayName = annotation.header().isEmpty() 
-                    ? field.getName() 
-                    : annotation.header();
-                
-                row.createCell(0).setCellValue(displayName);
-                
-                if (value != null) {
-                    Cell valueCell = row.createCell(1);
-                    if (value instanceof Date) {
-                        valueCell.setCellValue((Date) value);
-                        valueCell.setCellStyle(timestampStyle);
-                    } else if (value instanceof Number) {
-                        valueCell.setCellValue(((Number) value).doubleValue());
-                    } else if (value instanceof Boolean) {
-                        valueCell.setCellValue((Boolean) value);
-                    } else {
-                        valueCell.setCellValue(value.toString());
-                    }
-                }
-            } catch (IllegalAccessException e) {
-                throw new RuntimeException("Error accessing summary field", e);
-            }
+    public S3FlexibleUploader(S3Client s3Client, String bucketName, String sourceDir) {
+        this.s3Client = s3Client;
+        this.bucketName = bucketName;
+        this.sourceDir = Paths.get(sourceDir);
+    }
+
+    /**
+     * Uploads files to S3 with flexible destination based on upload type
+     * @param uploadType "regular" for date-based folders or "adhoc" for adhoc folder
+     */
+    public void uploadFiles(String uploadType) {
+        if (!uploadType.equalsIgnoreCase("regular") && !uploadType.equalsIgnoreCase("adhoc")) {
+            throw new IllegalArgumentException("Upload type must be either 'regular' or 'adhoc'");
         }
 
-        // Auto-size columns
-        summarySheet.autoSizeColumn(0);
-        summarySheet.autoSizeColumn(1);
-    } finally {
-        summarySheet.flushRows();
+        boolean isAdhoc = uploadType.equalsIgnoreCase("adhoc");
+
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(sourceDir, "*.xlsx")) {
+            for (Path file : stream) {
+                String filename = file.getFileName().toString();
+                
+                if (isAdhoc) {
+                    uploadToAdhocFolder(file);
+                } else {
+                    Optional<LocalDate> fileDate = extractDateFromFilename(filename);
+                    if (fileDate.isPresent()) {
+                        uploadToDateFolder(file, fileDate.get());
+                    } else {
+                        System.out.println("Skipping - Could not extract date from: " + filename);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error processing files: " + e.getMessage());
+            throw new RuntimeException("File upload failed", e);
+        }
+    }
+
+    private void uploadToAdhocFolder(Path file) {
+        String filename = file.getFileName().toString();
+        String s3Key = "adhoc/" + filename;
+        
+        try {
+            // Ensure adhoc folder exists
+            if (!folderExists("adhoc/")) {
+                createFolder("adhoc/");
+            }
+
+            PutObjectRequest request = PutObjectRequest.builder()
+                .bucket(bucketName)
+                .key(s3Key)
+                .build();
+
+            s3Client.putObject(request, RequestBody.fromFile(file));
+            System.out.println("Successfully uploaded to adhoc folder: " + s3Key);
+        } catch (Exception e) {
+            System.err.println("Failed to upload to adhoc folder: " + filename);
+            throw new RuntimeException("Adhoc upload failed for: " + filename, e);
+        }
+    }
+
+    private void uploadToDateFolder(Path file, LocalDate date) {
+        String year = String.valueOf(date.getYear());
+        String month = date.getMonth().name();
+        String day = String.valueOf(date.getDayOfMonth());
+        
+        ensureDateFolderStructureExists(year, month, day);
+        
+        String filename = file.getFileName().toString();
+        String s3Key = year + "/" + month + "/" + day + "/" + filename;
+        
+        try {
+            PutObjectRequest request = PutObjectRequest.builder()
+                .bucket(bucketName)
+                .key(s3Key)
+                .build();
+
+            s3Client.putObject(request, RequestBody.fromFile(file));
+            System.out.println("Successfully uploaded to date folder: " + s3Key);
+        } catch (Exception e) {
+            System.err.println("Failed to upload to date folder: " + filename);
+            throw new RuntimeException("Date-based upload failed for: " + filename, e);
+        }
+    }
+
+    private Optional<LocalDate> extractDateFromFilename(String filename) {
+        // Pattern 1: s3report_April_2_2025.xlsx
+        Pattern pattern1 = Pattern.compile(".*_(\\w+)_(\\d+)_(\\d+)\\.xlsx");
+        // Pattern 2: dbreport_April2_2025.xlsx
+        Pattern pattern2 = Pattern.compile(".*_(\\w+)(\\d+)_(\\d+)\\.xlsx");
+
+        Matcher matcher1 = pattern1.matcher(filename);
+        Matcher matcher2 = pattern2.matcher(filename);
+
+        try {
+            if (matcher1.matches()) {
+                return parseDateComponents(matcher1.group(1), matcher1.group(2), matcher1.group(3));
+            } else if (matcher2.matches()) {
+                String monthDay = matcher2.group(2);
+                String day = monthDay.replaceAll("^0+", "");
+                return parseDateComponents(matcher2.group(1), day, matcher2.group(3));
+            }
+        } catch (Exception e) {
+            System.err.println("Date extraction error for " + filename + ": " + e.getMessage());
+        }
+        return Optional.empty();
+    }
+
+    private Optional<LocalDate> parseDateComponents(String month, String day, String year) {
+        try {
+            DateTimeFormatter monthFormatter = DateTimeFormatter.ofPattern("MMMM");
+            Month monthObj = Month.from(monthFormatter.parse(month));
+            return Optional.of(LocalDate.of(
+                Integer.parseInt(year),
+                monthObj,
+                Integer.parseInt(day)
+            ));
+        } catch (Exception e) {
+            System.err.println("Date parsing error: " + e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    private void ensureDateFolderStructureExists(String year, String month, String day) {
+        String[] folders = {
+            year + "/",
+            year + "/" + month + "/",
+            year + "/" + month + "/" + day + "/"
+        };
+
+        for (String folder : folders) {
+            if (!folderExists(folder)) {
+                createFolder(folder);
+            }
+        }
+    }
+
+    private boolean folderExists(String folderPath) {
+        try {
+            s3Client.headObject(HeadObjectRequest.builder()
+                .bucket(bucketName)
+                .key(folderPath)
+                .build());
+            return true;
+        } catch (S3Exception e) {
+            if (e.statusCode() == 404) return false;
+            throw e;
+        }
+    }
+
+    private void createFolder(String folderPath) {
+        s3Client.putObject(PutObjectRequest.builder()
+            .bucket(bucketName)
+            .key(folderPath)
+            .build(), RequestBody.empty());
+        System.out.println("Created folder: " + folderPath);
+    }
+
+    public static void main(String[] args) {
+        S3Client s3Client = S3Client.create();
+        String bucketName = "your-bucket-name";
+        String sourceDirectory = "reports";
+        
+        S3FlexibleUploader uploader = new S3FlexibleUploader(s3Client, bucketName, sourceDirectory);
+        
+        // Example usage:
+        // For regular date-based upload
+        uploader.uploadFiles("regular");
+        
+        // For adhoc upload
+        // uploader.uploadFiles("adhoc");
     }
 }
