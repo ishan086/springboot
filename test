@@ -1,218 +1,65 @@
-import org.apache.poi.ss.usermodel.*;
-import org.apache.poi.xssf.streaming.SXSSFWorkbook;
-import org.apache.poi.xssf.streaming.SXSSFSheet;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.lang.reflect.Field;
-import java.util.Date;
-import java.util.*;
-
-public class LargeExcelWriter {
-
-    private static final int DEFAULT_WINDOW_SIZE = 100;
-    private static final int DEFAULT_FLUSH_INTERVAL = 50;
-    private static final int DEFAULT_MAX_COLUMN_WIDTH = 100;
-
-    public static <T, S> void writeLargeDataset(List<T> objects, S summaryObject, String filePath) throws IOException {
-        writeLargeDataset(objects, summaryObject, filePath, 
-                        DEFAULT_WINDOW_SIZE, DEFAULT_FLUSH_INTERVAL, DEFAULT_MAX_COLUMN_WIDTH);
-    }
-
-    public static <T, S> void writeLargeDataset(List<T> objects, S summaryObject, String filePath,
-                                              int windowSize, int flushInterval, int maxColumnWidth) throws IOException {
-        // Validate inputs
-        validateInputs(objects, filePath, windowSize, flushInterval, maxColumnWidth);
-
-        SXSSFWorkbook workbook = new SXSSFWorkbook(windowSize);
-        FileOutputStream fos = null;
-        try {
-            workbook.setCompressTempFiles(true);
-
-            // Create main data sheet
-            SXSSFSheet dataSheet = workbook.createSheet("Data");
-            try {
-                configureDataSheet(dataSheet, windowSize);
-                List<Field> orderedFields = processData(objects, workbook, dataSheet);
-                autoSizeColumns(dataSheet, orderedFields.size(), maxColumnWidth);
-
-                // Create summary sheet if needed
-                if (summaryObject != null) {
-                    createSummarySheet(workbook, summaryObject);
-                }
-
-                // Write to file
-                fos = new FileOutputStream(filePath);
-                workbook.write(fos);
-            } finally {
-                dataSheet.flushRows();
-            }
-        } finally {
-            try {
-                if (fos != null) {
-                    fos.close();
-                }
-            } finally {
-                workbook.close();
-            }
-        }
-    }
-
-    private static <T> List<Field> processData(List<T> objects, SXSSFWorkbook workbook, SXSSFSheet sheet) 
-            throws IOException {
-        List<Field> orderedFields = getOrderedFields(objects.get(0).getClass());
+private static <S> void createSummarySheet(SXSSFWorkbook workbook, S summaryObject) throws IOException {
+    SXSSFSheet summarySheet = workbook.createSheet("Summary");
+    try {
+        summarySheet.setRandomAccessWindowSize(10);
         CellStyle headerStyle = createHeaderStyle(workbook);
-        Map<Class<?>, CellStyle> dataStyles = createDataStyles(workbook);
-
-        createHeaderRow(sheet, orderedFields, headerStyle);
-        writeDataRows(sheet, objects, orderedFields, dataStyles, workbook);
         
-        return orderedFields;
-    }
+        // Create header
+        Row headerRow = summarySheet.createRow(0);
+        headerRow.createCell(0).setCellValue("Field Name");
+        headerRow.createCell(1).setCellValue("Value");
+        headerRow.getCell(0).setCellStyle(headerStyle);
+        headerRow.getCell(1).setCellStyle(headerStyle);
 
-    private static void validateInputs(List<?> objects, String filePath, 
-                                     int windowSize, int flushInterval, int maxColumnWidth) {
-        if (objects == null || objects.isEmpty()) {
-            throw new IllegalArgumentException("Object list cannot be null or empty");
-        }
-        if (filePath == null || !filePath.toLowerCase().endsWith(".xlsx")) {
-            throw new IllegalArgumentException("File path must end with .xlsx extension");
-        }
-        if (windowSize <= 0) {
-            throw new IllegalArgumentException("Window size must be positive");
-        }
-        if (flushInterval <= 0) {
-            throw new IllegalArgumentException("Flush interval must be positive");
-        }
-        if (maxColumnWidth <= 0) {
-            throw new IllegalArgumentException("Max column width must be positive");
-        }
-    }
+        // Create date style for 24-hour timestamp
+        CellStyle timestampStyle = workbook.createCellStyle();
+        timestampStyle.setDataFormat(workbook.createDataFormat().getFormat("yyyy-mm-dd hh:mm"));
 
-    private static void configureDataSheet(SXSSFSheet sheet, int windowSize) {
-        sheet.setRandomAccessWindowSize(windowSize);
-        sheet.createFreezePane(0, 1, 0, 1); // Freeze header row
-    }
-
-    private static List<Field> getOrderedFields(Class<?> clazz) {
-        return Arrays.stream(clazz.getDeclaredFields())
+        // Get fields in ExcelColumn order
+        List<Field> orderedFields = Arrays.stream(summaryObject.getClass().getDeclaredFields())
                 .filter(f -> f.isAnnotationPresent(ExcelColumn.class))
                 .sorted(Comparator.comparingInt(f -> f.getAnnotation(ExcelColumn.class).order()))
                 .collect(Collectors.toList());
-    }
 
-    private static CellStyle createHeaderStyle(Workbook workbook) {
-        CellStyle style = workbook.createCellStyle();
-        Font font = workbook.createFont();
-        font.setBold(true);
-        font.setColor(IndexedColors.WHITE.getIndex());
-        style.setFont(font);
-        style.setFillForegroundColor(IndexedColors.DARK_BLUE.getIndex());
-        style.setFillPattern(FillPatternType.SOLID_FOREGROUND);
-        style.setAlignment(HorizontalAlignment.CENTER);
-        style.setBorderBottom(BorderStyle.THIN);
-        style.setBorderTop(BorderStyle.THIN);
-        style.setBorderLeft(BorderStyle.THIN);
-        style.setBorderRight(BorderStyle.THIN);
-        return style;
-    }
-
-    private static Map<Class<?>, CellStyle> createDataStyles(Workbook workbook) {
-        Map<Class<?>, CellStyle> styles = new HashMap<>();
-        
-        // Default style
-        CellStyle defaultStyle = workbook.createCellStyle();
-        defaultStyle.setAlignment(HorizontalAlignment.LEFT);
-        styles.put(Object.class, defaultStyle);
-
-        // Number style
-        CellStyle numberStyle = workbook.createCellStyle();
-        numberStyle.setAlignment(HorizontalAlignment.RIGHT);
-        styles.put(Number.class, numberStyle);
-
-        // Date style (base format - will be overridden for timestamps)
-        CellStyle dateStyle = workbook.createCellStyle();
-        dateStyle.setDataFormat(workbook.createDataFormat().getFormat("yyyy-mm-dd"));
-        styles.put(Date.class, dateStyle);
-
-        // Boolean style
-        CellStyle booleanStyle = workbook.createCellStyle();
-        booleanStyle.setAlignment(HorizontalAlignment.CENTER);
-        styles.put(Boolean.class, booleanStyle);
-
-        return styles;
-    }
-
-    private static void createHeaderRow(SXSSFSheet sheet, List<Field> fields, CellStyle headerStyle) {
-        Row headerRow = sheet.createRow(0);
-        for (int i = 0; i < fields.size(); i++) {
-            Field field = fields.get(i);
-            ExcelColumn annotation = field.getAnnotation(ExcelColumn.class);
-            String header = annotation.header().isEmpty() ? field.getName() : annotation.header();
-            
-            Cell cell = headerRow.createCell(i);
-            cell.setCellValue(header);
-            cell.setCellStyle(headerStyle);
-        }
-    }
-
-    private static <T> void writeDataRows(SXSSFSheet sheet, List<T> objects, 
-            List<Field> fields, Map<Class<?>, CellStyle> dataStyles, Workbook workbook) throws IOException {
-        int rowCount = 0;
-        final int flushInterval = Math.min(DEFAULT_FLUSH_INTERVAL, sheet.getRandomAccessWindowSize() / 2);
-        
-        for (T obj : objects) {
-            Row row = sheet.createRow(++rowCount);
-            
-            for (int i = 0; i < fields.size(); i++) {
-                Field field = fields.get(i);
-                try {
-                    field.setAccessible(true);
-                    Object value = field.get(obj);
-                    Cell cell = row.createCell(i);
-                    
-                    if (value != null) {
-                        setCellValue(cell, value, dataStyles, workbook);
+        // Write summary data in specified order
+        int rowNum = 1;
+        for (Field field : orderedFields) {
+            try {
+                field.setAccessible(true);
+                Object value = field.get(summaryObject);
+                ExcelColumn annotation = field.getAnnotation(ExcelColumn.class);
+                
+                Row row = summarySheet.createRow(rowNum++);
+                
+                // Use annotation header if specified, otherwise use field name
+                String displayName = annotation.header().isEmpty() 
+                    ? field.getName() 
+                    : annotation.header();
+                
+                row.createCell(0).setCellValue(displayName);
+                
+                if (value != null) {
+                    Cell valueCell = row.createCell(1);
+                    if (value instanceof Date) {
+                        valueCell.setCellValue((Date) value);
+                        valueCell.setCellStyle(timestampStyle);
+                    } else if (value instanceof Number) {
+                        valueCell.setCellValue(((Number) value).doubleValue());
+                    } else if (value instanceof Boolean) {
+                        valueCell.setCellValue((Boolean) value);
+                    } else {
+                        valueCell.setCellValue(value.toString());
                     }
-                } catch (IllegalAccessException e) {
-                    throw new RuntimeException("Error accessing field value", e);
                 }
-            }
-            
-            if (rowCount % flushInterval == 0) {
-                sheet.flushRows(flushInterval);
+            } catch (IllegalAccessException e) {
+                throw new RuntimeException("Error accessing summary field", e);
             }
         }
-    }
 
-    private static void setCellValue(Cell cell, Object value, 
-            Map<Class<?>, CellStyle> dataStyles, Workbook workbook) {
-        Class<?> valueType = value.getClass();
-        CellStyle style = dataStyles.getOrDefault(valueType, 
-            dataStyles.get(Number.class.isAssignableFrom(valueType) ? Number.class :
-            Date.class.isAssignableFrom(valueType) ? Date.class :
-            Boolean.class.isAssignableFrom(valueType) ? Boolean.class :
-            Object.class));
-        
-        // Special handling for dates to include timestamp
-        if (value instanceof Date) {
-            CellStyle dateTimeStyle = workbook.createCellStyle();
-            dateTimeStyle.cloneStyleFrom(style);
-            dateTimeStyle.setDataFormat(workbook.createDataFormat().getFormat("yyyy-mm-dd hh:mm"));
-            cell.setCellStyle(dateTimeStyle);
-            cell.setCellValue((Date) value);
-        } else {
-            cell.setCellStyle(style);
-            
-            if (value instanceof Number) {
-                cell.setCellValue(((Number) value).doubleValue());
-            } else if (value instanceof Boolean) {
-                cell.setCellValue((Boolean) value);
-            } else {
-                cell.setCellValue(value.toString());
-            }
-        }
+        // Auto-size columns
+        summarySheet.autoSizeColumn(0);
+        summarySheet.autoSizeColumn(1);
+    } finally {
+        summarySheet.flushRows();
     }
-
-    private static void autoSizeColumns(SXSSFSheet sheet, int columnCount, int maxColumnWidth) {
-        for (int i = 0; i < columnCount; i++) {
-            sheet.trackColumnForAutoSizing
+}
