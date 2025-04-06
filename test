@@ -3,6 +3,7 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
 import java.nio.file.*;
 import java.time.*;
+import java.time.format.*;
 import java.util.*;
 import java.util.regex.*;
 
@@ -11,6 +12,7 @@ public class S3FlexibleUploader {
     private final S3Client s3Client;
     private final String bucketName;
     private final Path sourceDir;
+    private static final String PARENT_FOLDER = "reporting/";
 
     public S3FlexibleUploader(S3Client s3Client, String bucketName, String sourceDir) {
         this.s3Client = s3Client;
@@ -23,13 +25,12 @@ public class S3FlexibleUploader {
      * @param uploadType "regular" for date-based folders or "adhoc" for adhoc folder
      */
     public void uploadFiles(String uploadType) {
-        if (!uploadType.equalsIgnoreCase("regular") && !uploadType.equalsIgnoreCase("adhoc")) {
-            throw new IllegalArgumentException("Upload type must be either 'regular' or 'adhoc'");
-        }
-
+        validateUploadType(uploadType);
         boolean isAdhoc = uploadType.equalsIgnoreCase("adhoc");
 
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(sourceDir, "*.xlsx")) {
+            ensureParentFolderExists();
+
             for (Path file : stream) {
                 String filename = file.getFileName().toString();
                 
@@ -37,38 +38,38 @@ public class S3FlexibleUploader {
                     uploadToAdhocFolder(file);
                 } else {
                     Optional<LocalDate> fileDate = extractDateFromFilename(filename);
-                    if (fileDate.isPresent()) {
-                        uploadToDateFolder(file, fileDate.get());
-                    } else {
-                        System.out.println("Skipping - Could not extract date from: " + filename);
-                    }
+                    fileDate.ifPresentOrElse(
+                        date -> uploadToDateFolder(file, date),
+                        () -> System.out.println("Skipping - Could not extract date from: " + filename)
+                    );
                 }
             }
         } catch (Exception e) {
-            System.err.println("Error processing files: " + e.getMessage());
-            throw new RuntimeException("File upload failed", e);
+            handleUploadError(e);
+        }
+    }
+
+    private void validateUploadType(String uploadType) {
+        if (!uploadType.equalsIgnoreCase("regular") && !uploadType.equalsIgnoreCase("adhoc")) {
+            throw new IllegalArgumentException("Upload type must be either 'regular' or 'adhoc'");
+        }
+    }
+
+    private void ensureParentFolderExists() {
+        if (!folderExists(PARENT_FOLDER)) {
+            createFolder(PARENT_FOLDER);
         }
     }
 
     private void uploadToAdhocFolder(Path file) {
         String filename = file.getFileName().toString();
-        String s3Key = "adhoc/" + filename;
+        String s3Key = PARENT_FOLDER + "adhoc/" + filename;
         
         try {
-            // Ensure adhoc folder exists
-            if (!folderExists("adhoc/")) {
-                createFolder("adhoc/");
-            }
-
-            PutObjectRequest request = PutObjectRequest.builder()
-                .bucket(bucketName)
-                .key(s3Key)
-                .build();
-
-            s3Client.putObject(request, RequestBody.fromFile(file));
+            ensureFolderExists(PARENT_FOLDER + "adhoc/");
+            uploadFileToS3(file, s3Key);
             System.out.println("Successfully uploaded to adhoc folder: " + s3Key);
         } catch (Exception e) {
-            System.err.println("Failed to upload to adhoc folder: " + filename);
             throw new RuntimeException("Adhoc upload failed for: " + filename, e);
         }
     }
@@ -81,20 +82,22 @@ public class S3FlexibleUploader {
         ensureDateFolderStructureExists(year, month, day);
         
         String filename = file.getFileName().toString();
-        String s3Key = year + "/" + month + "/" + day + "/" + filename;
+        String s3Key = PARENT_FOLDER + year + "/" + month + "/" + day + "/" + filename;
         
         try {
-            PutObjectRequest request = PutObjectRequest.builder()
-                .bucket(bucketName)
-                .key(s3Key)
-                .build();
-
-            s3Client.putObject(request, RequestBody.fromFile(file));
+            uploadFileToS3(file, s3Key);
             System.out.println("Successfully uploaded to date folder: " + s3Key);
         } catch (Exception e) {
-            System.err.println("Failed to upload to date folder: " + filename);
             throw new RuntimeException("Date-based upload failed for: " + filename, e);
         }
+    }
+
+    private void uploadFileToS3(Path file, String s3Key) {
+        PutObjectRequest request = PutObjectRequest.builder()
+            .bucket(bucketName)
+            .key(s3Key)
+            .build();
+        s3Client.putObject(request, RequestBody.fromFile(file));
     }
 
     private Optional<LocalDate> extractDateFromFilename(String filename) {
@@ -137,9 +140,9 @@ public class S3FlexibleUploader {
 
     private void ensureDateFolderStructureExists(String year, String month, String day) {
         String[] folders = {
-            year + "/",
-            year + "/" + month + "/",
-            year + "/" + month + "/" + day + "/"
+            PARENT_FOLDER + year + "/",
+            PARENT_FOLDER + year + "/" + month + "/",
+            PARENT_FOLDER + year + "/" + month + "/" + day + "/"
         };
 
         for (String folder : folders) {
@@ -170,8 +173,17 @@ public class S3FlexibleUploader {
         System.out.println("Created folder: " + folderPath);
     }
 
+    private void handleUploadError(Exception e) {
+        System.err.println("Error processing files: " + e.getMessage());
+        throw new RuntimeException("File upload failed", e);
+    }
+
     public static void main(String[] args) {
-        S3Client s3Client = S3Client.create();
+        // Initialize AWS S3 client
+        S3Client s3Client = S3Client.builder()
+            .region(Region.US_EAST_1) // Set your region
+            .build();
+
         String bucketName = "your-bucket-name";
         String sourceDirectory = "reports";
         
