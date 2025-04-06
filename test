@@ -20,16 +20,12 @@ public class S3FlexibleUploader {
         this.sourceDir = Paths.get(sourceDir);
     }
 
-    /**
-     * Uploads files to S3 with flexible destination based on upload type
-     * @param uploadType "regular" for date-based folders or "adhoc" for adhoc folder
-     */
     public void uploadFiles(String uploadType) {
         validateUploadType(uploadType);
         boolean isAdhoc = uploadType.equalsIgnoreCase("adhoc");
 
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(sourceDir, "*.xlsx")) {
-            ensureParentFolderExists();
+            ensureFolderExists(PARENT_FOLDER);
 
             for (Path file : stream) {
                 String filename = file.getFileName().toString();
@@ -55,9 +51,9 @@ public class S3FlexibleUploader {
         }
     }
 
-    private void ensureParentFolderExists() {
-        if (!folderExists(PARENT_FOLDER)) {
-            createFolder(PARENT_FOLDER);
+    private void ensureFolderExists(String folderPath) {
+        if (!folderExists(folderPath)) {
+            createFolder(folderPath);
         }
     }
 
@@ -79,10 +75,11 @@ public class S3FlexibleUploader {
         String month = date.getMonth().name();
         String day = String.valueOf(date.getDayOfMonth());
         
-        ensureDateFolderStructureExists(year, month, day);
+        String dateFolderPath = PARENT_FOLDER + year + "/" + month + "/" + day + "/";
+        ensureFolderExists(dateFolderPath);
         
         String filename = file.getFileName().toString();
-        String s3Key = PARENT_FOLDER + year + "/" + month + "/" + day + "/" + filename;
+        String s3Key = dateFolderPath + filename;
         
         try {
             uploadFileToS3(file, s3Key);
@@ -135,20 +132,6 @@ public class S3FlexibleUploader {
         } catch (Exception e) {
             System.err.println("Date parsing error: " + e.getMessage());
             return Optional.empty();
-        }
-    }
-
-    private void ensureDateFolderStructureExists(String year, String month, String day) {
-        String[] folders = {
-            PARENT_FOLDER + year + "/",
-            PARENT_FOLDER + year + "/" + month + "/",
-            PARENT_FOLDER + year + "/" + month + "/" + day + "/"
-        };
-
-        for (String folder : folders) {
-            if (!folderExists(folder)) {
-                createFolder(folder);
-            }
         }
     }
 
