@@ -1,182 +1,36 @@
-import software.amazon.awssdk.core.sync.RequestBody;
-import software.amazon.awssdk.services.s3.S3Client;
-import software.amazon.awssdk.services.s3.model.*;
-import java.nio.file.*;
-import java.time.*;
-import java.time.format.*;
-import java.util.*;
-import java.util.regex.*;
+package com.example.batch.config;
 
-public class S3FlexibleUploader {
+import com.example.batch.model.Person;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVPrinter;
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.stereotype.Component;
 
-    private final S3Client s3Client;
-    private final String bucketName;
-    private final Path sourceDir;
-    private static final String PARENT_FOLDER = "reporting/";
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.List;
 
-    public S3FlexibleUploader(S3Client s3Client, String bucketName, String sourceDir) {
-        this.s3Client = s3Client;
-        this.bucketName = bucketName;
-        this.sourceDir = Paths.get(sourceDir);
-    }
+@Component
+public class CsvFileWriter implements ItemWriter<Person> {
 
-    public void uploadFiles(String uploadType) {
-        validateUploadType(uploadType);
-        boolean isAdhoc = uploadType.equalsIgnoreCase("adhoc");
+    private static final String FILE_PATH = "output/persons.csv";
+    private boolean headerWritten = false;
 
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(sourceDir, "*.xlsx")) {
-            ensureFolderExists(PARENT_FOLDER);
+    @Override
+    public void write(List<? extends Person> items) throws IOException {
+        try (FileWriter fileWriter = new FileWriter(FILE_PATH, true);
+             CSVPrinter csvPrinter = new CSVPrinter(fileWriter, CSVFormat.DEFAULT)) {
 
-            for (Path file : stream) {
-                String filename = file.getFileName().toString();
-                
-                if (isAdhoc) {
-                    uploadToAdhocFolder(file);
-                } else {
-                    Optional<LocalDate> fileDate = extractDateFromFilename(filename);
-                    fileDate.ifPresentOrElse(
-                        date -> uploadToDateFolder(file, date),
-                        () -> System.out.println("Skipping - Could not extract date from: " + filename)
-                    );
-                }
+            // Write headers only once
+            if (!headerWritten) {
+                csvPrinter.printRecord("ID", "Name", "Email");
+                headerWritten = true;
             }
-        } catch (Exception e) {
-            handleUploadError(e);
-        }
-    }
 
-    private void validateUploadType(String uploadType) {
-        if (!uploadType.equalsIgnoreCase("regular") && !uploadType.equalsIgnoreCase("adhoc")) {
-            throw new IllegalArgumentException("Upload type must be either 'regular' or 'adhoc'");
-        }
-    }
-
-    private void ensureFolderExists(String folderPath) {
-        if (!folderExists(folderPath)) {
-            createFolder(folderPath);
-        }
-    }
-
-    private void uploadToAdhocFolder(Path file) {
-        String filename = file.getFileName().toString();
-        String s3Key = PARENT_FOLDER + "adhoc/" + filename;
-        
-        try {
-            ensureFolderExists(PARENT_FOLDER + "adhoc/");
-            uploadFileToS3(file, s3Key);
-            System.out.println("Successfully uploaded to adhoc folder: " + s3Key);
-        } catch (Exception e) {
-            throw new RuntimeException("Adhoc upload failed for: " + filename, e);
-        }
-    }
-
-    private void uploadToDateFolder(Path file, LocalDate date) {
-        String year = String.valueOf(date.getYear());
-        String month = date.getMonth().name();
-        String day = String.valueOf(date.getDayOfMonth());
-        
-        String dateFolderPath = PARENT_FOLDER + year + "/" + month + "/" + day + "/";
-        ensureFolderExists(dateFolderPath);
-        
-        String filename = file.getFileName().toString();
-        String s3Key = dateFolderPath + filename;
-        
-        try {
-            uploadFileToS3(file, s3Key);
-            System.out.println("Successfully uploaded to date folder: " + s3Key);
-        } catch (Exception e) {
-            throw new RuntimeException("Date-based upload failed for: " + filename, e);
-        }
-    }
-
-    private void uploadFileToS3(Path file, String s3Key) {
-        PutObjectRequest request = PutObjectRequest.builder()
-            .bucket(bucketName)
-            .key(s3Key)
-            .build();
-        s3Client.putObject(request, RequestBody.fromFile(file));
-    }
-
-    private Optional<LocalDate> extractDateFromFilename(String filename) {
-        // Pattern 1: s3report_April_2_2025.xlsx
-        Pattern pattern1 = Pattern.compile(".*_(\\w+)_(\\d+)_(\\d+)\\.xlsx");
-        // Pattern 2: dbreport_April2_2025.xlsx
-        Pattern pattern2 = Pattern.compile(".*_(\\w+)(\\d+)_(\\d+)\\.xlsx");
-
-        Matcher matcher1 = pattern1.matcher(filename);
-        Matcher matcher2 = pattern2.matcher(filename);
-
-        try {
-            if (matcher1.matches()) {
-                return parseDateComponents(matcher1.group(1), matcher1.group(2), matcher1.group(3));
-            } else if (matcher2.matches()) {
-                String monthDay = matcher2.group(2);
-                String day = monthDay.replaceAll("^0+", "");
-                return parseDateComponents(matcher2.group(1), day, matcher2.group(3));
+            // Write data rows
+            for (Person person : items) {
+                csvPrinter.printRecord(person.getId(), person.getName(), person.getEmail());
             }
-        } catch (Exception e) {
-            System.err.println("Date extraction error for " + filename + ": " + e.getMessage());
         }
-        return Optional.empty();
-    }
-
-    private Optional<LocalDate> parseDateComponents(String month, String day, String year) {
-        try {
-            DateTimeFormatter monthFormatter = DateTimeFormatter.ofPattern("MMMM");
-            Month monthObj = Month.from(monthFormatter.parse(month));
-            return Optional.of(LocalDate.of(
-                Integer.parseInt(year),
-                monthObj,
-                Integer.parseInt(day)
-            ));
-        } catch (Exception e) {
-            System.err.println("Date parsing error: " + e.getMessage());
-            return Optional.empty();
-        }
-    }
-
-    private boolean folderExists(String folderPath) {
-        try {
-            s3Client.headObject(HeadObjectRequest.builder()
-                .bucket(bucketName)
-                .key(folderPath)
-                .build());
-            return true;
-        } catch (S3Exception e) {
-            if (e.statusCode() == 404) return false;
-            throw e;
-        }
-    }
-
-    private void createFolder(String folderPath) {
-        s3Client.putObject(PutObjectRequest.builder()
-            .bucket(bucketName)
-            .key(folderPath)
-            .build(), RequestBody.empty());
-        System.out.println("Created folder: " + folderPath);
-    }
-
-    private void handleUploadError(Exception e) {
-        System.err.println("Error processing files: " + e.getMessage());
-        throw new RuntimeException("File upload failed", e);
-    }
-
-    public static void main(String[] args) {
-        // Initialize AWS S3 client
-        S3Client s3Client = S3Client.builder()
-            .region(Region.US_EAST_1) // Set your region
-            .build();
-
-        String bucketName = "your-bucket-name";
-        String sourceDirectory = "reports";
-        
-        S3FlexibleUploader uploader = new S3FlexibleUploader(s3Client, bucketName, sourceDirectory);
-        
-        // Example usage:
-        // For regular date-based upload
-        uploader.uploadFiles("regular");
-        
-        // For adhoc upload
-        // uploader.uploadFiles("adhoc");
     }
 }
